@@ -1,0 +1,71 @@
+# MSigDB Signature Generator - .gitignore
+# =========================================
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Data Files (LARGE - Don't commit to GitHub)
+data/knowledge_base.json.gz
+data/embeddings/*.pkl
+data/faiss_index.bin
+data/faiss_index.bin.ids
+
+# Results & Outputs (Generated files)
+results/
+outputs/
+*.gmt
+*.json
+temp/
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# API Keys & Secrets (NEVER COMMIT)
+.env
+secrets.txt
+tokens.txt
+*.key
+
+# Temporary files
+*.tmp
+*.bak
+*~
