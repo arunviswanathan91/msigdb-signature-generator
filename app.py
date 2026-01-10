@@ -1,13 +1,15 @@
 """
-Biological Signature Generator - CORRECTED VERSION
-===================================================
+Biological Signature Generator - COMPLETE MULTI-LAYER PIPELINE
+===============================================================
 
-FIXES IMPLEMENTED:
-1. Mechanism-level facet decomposition (not category-level)
-2. Gene relevance scoring (not frequency counting)
-3. Strict gene size enforcement DURING construction
-4. Multiple mechanism signatures per facet
-5. Gene-level neighbor expansion (not pathway-level)
+LAYERS IMPLEMENTED:
+1. LLM-based Granularity Control (Qwen/Qwen2.5-72B-Instruct)
+2. Semantic Pathway Selection
+3. Mathematical Neighbor Expansion (DAM) - Optional
+4. LLM Verification & Expansion (BioMedLM/BioGPT) - Optional
+5. Interactive Approval Interface
+
+User controls EVERY decision point.
 """
 
 import streamlit as st
@@ -19,19 +21,11 @@ from datetime import datetime
 from typing import Dict, List, Any, Optional, Set, Tuple
 import time
 import numpy as np
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from collections import Counter, defaultdict
 
-# Import KB builder
-try:
-    from kb_builder import KBBuilder, validate_gmt_content
-    KB_BUILDER_AVAILABLE = True
-except ImportError:
-    KB_BUILDER_AVAILABLE = False
-
-
 # ============================================================
-# GENE SIGNATURE DATA CLASS
+# DATA CLASSES
 # ============================================================
 
 @dataclass
@@ -43,7 +37,10 @@ class GeneSignature:
     facet: str
     mechanism: str
     confidence: float
-    gene_scores: Dict[str, float]  # Track individual gene relevance
+    gene_scores: Dict[str, float] = field(default_factory=dict)
+    source_pathways: List[str] = field(default_factory=list)
+    dam_expanded: bool = False
+    llm2_verified: bool = False
     
     def to_dict(self):
         return {
@@ -54,96 +51,69 @@ class GeneSignature:
             'facet': self.facet,
             'mechanism': self.mechanism,
             'confidence': self.confidence,
-            'top_genes': self.genes[:5] if len(self.genes) > 5 else self.genes
+            'top_genes': self.genes[:5] if len(self.genes) > 5 else self.genes,
+            'dam_expanded': self.dam_expanded,
+            'llm2_verified': self.llm2_verified
         }
 
 
+@dataclass
+class DecompositionResult:
+    """Result from LLM decomposition"""
+    facets: List[Dict[str, str]]
+    granularity_level: int
+    timestamp: str
+    llm_model: str
+
+
 # ============================================================
-# SIGNATURE BUILDER - BIOLOGICALLY CORRECTED
+# SIGNATURE BUILDER
 # ============================================================
 
 class SignatureBuilder:
-    """
-    Builds gene signatures with BIOLOGICAL RELEVANCE, not frequency.
-    
-    KEY FIXES:
-    1. Gene scoring based on pathway similarity (not occurrence count)
-    2. Hard gene limits enforced DURING construction
-    3. Multiple mechanism signatures per facet
-    4. Gene-level neighbor expansion with scoring
-    """
+    """Builds gene signatures with relevance scoring and DAM expansion"""
     
     def __init__(self, min_genes: int = 10, max_genes: int = 20):
-        """
-        Args:
-            min_genes: Minimum genes per signature (hard constraint)
-            max_genes: Maximum genes per signature (hard constraint)
-        """
         self.min_genes = min_genes
         self.max_genes = max_genes
     
-    def build_signatures_from_pathways(
+    def build_signature_from_pathways(
         self,
         facet_name: str,
         mechanism_name: str,
         pathways_dict: Dict[str, List[str]],
         pathway_similarities: Dict[str, float]
     ) -> Optional[GeneSignature]:
-        """
-        Build ONE signature for one mechanism using RELEVANCE SCORING.
+        """Build ONE signature using relevance scoring"""
         
-        BIOLOGICAL LOGIC:
-        - Each gene is scored by: Σ(pathway_similarity × gene_presence)
-        - Genes in high-similarity pathways get higher scores
-        - Top-scoring genes selected up to max_genes limit
-        
-        Args:
-            facet_name: Biological facet (e.g., "T-cell Exhaustion")
-            mechanism_name: Specific mechanism (e.g., "Checkpoint Signaling")
-            pathways_dict: pathway_id -> gene_list
-            pathway_similarities: pathway_id -> similarity_score
-            
-        Returns:
-            GeneSignature or None if insufficient genes
-        """
         if not pathways_dict:
             return None
         
-        # SCORE GENES BY RELEVANCE (not frequency!)
         gene_scores = defaultdict(float)
+        source_pathways = []
         
         for pathway_id, genes in pathways_dict.items():
             similarity = pathway_similarities.get(pathway_id, 0.0)
+            source_pathways.append(pathway_id)
             
-            # Each gene gets weighted by pathway similarity
             for gene in genes:
                 gene_scores[gene] += similarity
         
         if not gene_scores:
             return None
         
-        # RANK genes by relevance score
-        ranked_genes = sorted(
-            gene_scores.items(),
-            key=lambda x: x[1],
-            reverse=True
-        )
-        
-        # ENFORCE SIZE LIMITS
-        # Select TOP N genes (not unlimited!)
+        ranked_genes = sorted(gene_scores.items(), key=lambda x: x[1], reverse=True)
         selected_pairs = ranked_genes[:self.max_genes]
         
         if len(selected_pairs) < self.min_genes:
-            return None  # Insufficient genes for meaningful signature
+            return None
         
         selected_genes = [gene for gene, score in selected_pairs]
         scores_dict = dict(selected_pairs)
         
-        # Calculate confidence from average score
         avg_score = np.mean([score for gene, score in selected_pairs])
-        confidence = min(0.99, avg_score)  # Cap at 0.99
+        confidence = min(0.99, avg_score)
         
-        # Create signature ID
         sig_id = f"{self._make_id(facet_name)}_{self._make_id(mechanism_name)}"
         
         return GeneSignature(
@@ -153,91 +123,126 @@ class SignatureBuilder:
             facet=facet_name,
             mechanism=mechanism_name,
             confidence=confidence,
-            gene_scores=scores_dict
+            gene_scores=scores_dict,
+            source_pathways=source_pathways[:5]
         )
     
-    def build_multiple_mechanism_signatures(
+    def build_multiple_mechanisms(
         self,
         facet_name: str,
         pathways_dict: Dict[str, List[str]],
         pathway_similarities: Dict[str, float],
-        num_mechanisms: int = 3
+        num_variants: int = 3
     ) -> List[GeneSignature]:
-        """
-        Build MULTIPLE signatures per facet by clustering genes into mechanisms.
+        """Build multiple mechanism variants per facet"""
         
-        This achieves the required signature count while maintaining biological meaning.
-        
-        Args:
-            facet_name: Biological facet
-            pathways_dict: Available pathways
-            pathway_similarities: Pathway relevance scores
-            num_mechanisms: How many mechanism variants to generate
-            
-        Returns:
-            List of GeneSignature objects (one per mechanism)
-        """
         signatures = []
         
-        # Mechanism 1: Core checkpoint genes (highest scoring)
-        core_sig = self.build_signatures_from_pathways(
-            facet_name,
-            "Core Markers",
-            pathways_dict,
-            pathway_similarities
+        # Core
+        core_sig = self.build_signature_from_pathways(
+            facet_name, "Core Markers", pathways_dict, pathway_similarities
         )
         if core_sig:
             signatures.append(core_sig)
         
-        # Mechanism 2: Extended markers (top 50% of pathways)
+        # Extended (top pathways)
         if len(pathways_dict) >= 4:
-            sorted_pathways = sorted(
-                pathway_similarities.items(),
-                key=lambda x: x[1],
-                reverse=True
-            )
+            sorted_pathways = sorted(pathway_similarities.items(), key=lambda x: x[1], reverse=True)
             top_half_ids = [pid for pid, _ in sorted_pathways[:len(sorted_pathways)//2]]
-            top_half_pathways = {pid: pathways_dict[pid] for pid in top_half_ids if pid in pathways_dict}
-            top_half_sims = {pid: pathway_similarities[pid] for pid in top_half_ids if pid in pathway_similarities}
+            top_pathways = {pid: pathways_dict[pid] for pid in top_half_ids if pid in pathways_dict}
+            top_sims = {pid: pathway_similarities[pid] for pid in top_half_ids if pid in pathway_similarities}
             
-            extended_sig = self.build_signatures_from_pathways(
-                facet_name,
-                "Extended Network",
-                top_half_pathways,
-                top_half_sims
+            extended_sig = self.build_signature_from_pathways(
+                facet_name, "Extended Network", top_pathways, top_sims
             )
             if extended_sig and extended_sig.genes != core_sig.genes:
                 signatures.append(extended_sig)
         
-        # Mechanism 3: Regulatory variants (bottom 50% of pathways)
-        if len(pathways_dict) >= 4 and len(signatures) < num_mechanisms:
-            sorted_pathways = sorted(
-                pathway_similarities.items(),
-                key=lambda x: x[1],
-                reverse=True
-            )
+        # Regulatory (bottom pathways)
+        if len(pathways_dict) >= 4 and len(signatures) < num_variants:
+            sorted_pathways = sorted(pathway_similarities.items(), key=lambda x: x[1], reverse=True)
             bottom_half_ids = [pid for pid, _ in sorted_pathways[len(sorted_pathways)//2:]]
-            bottom_half_pathways = {pid: pathways_dict[pid] for pid in bottom_half_ids if pid in pathways_dict}
-            bottom_half_sims = {pid: pathway_similarities[pid] for pid in bottom_half_ids if pid in pathway_similarities}
+            bottom_pathways = {pid: pathways_dict[pid] for pid in bottom_half_ids if pid in pathways_dict}
+            bottom_sims = {pid: pathway_similarities[pid] for pid in bottom_half_ids if pid in pathway_similarities}
             
-            regulatory_sig = self.build_signatures_from_pathways(
-                facet_name,
-                "Regulatory Context",
-                bottom_half_pathways,
-                bottom_half_sims
+            regulatory_sig = self.build_signature_from_pathways(
+                facet_name, "Regulatory Context", bottom_pathways, bottom_sims
             )
             if regulatory_sig:
                 signatures.append(regulatory_sig)
         
         return signatures
     
+    def expand_with_dam(
+        self,
+        signature: GeneSignature,
+        pathways_kb: Dict[str, List[str]],
+        expansion_strength: float = 0.5,
+        max_additional: int = 5
+    ) -> GeneSignature:
+        """Expand signature using DAM"""
+        
+        gene_cooccurrence = self._build_cooccurrence_matrix(pathways_kb, signature.genes)
+        
+        neighbor_scores = {}
+        
+        for seed_gene in signature.genes:
+            neighbors = gene_cooccurrence.get(seed_gene, {})
+            
+            for neighbor, score in neighbors.items():
+                if neighbor not in signature.genes:
+                    neighbor_scores[neighbor] = max(
+                        neighbor_scores.get(neighbor, 0),
+                        score * expansion_strength
+                    )
+        
+        top_neighbors = sorted(neighbor_scores.items(), key=lambda x: x[1], reverse=True)
+        top_neighbors = top_neighbors[:max_additional]
+        
+        expanded_genes = signature.genes + [g for g, _ in top_neighbors]
+        
+        if len(expanded_genes) > self.max_genes:
+            expanded_genes = expanded_genes[:self.max_genes]
+        
+        signature.genes = expanded_genes
+        signature.dam_expanded = True
+        
+        return signature
+    
+    def _build_cooccurrence_matrix(
+        self,
+        pathways_kb: Dict[str, List[str]],
+        seed_genes: List[str]
+    ) -> Dict[str, Dict[str, float]]:
+        """Build gene co-occurrence matrix from KB"""
+        
+        cooccurrence = defaultdict(lambda: defaultdict(int))
+        
+        for pathway_id, genes in pathways_kb.items():
+            gene_set = set(genes)
+            
+            for seed_gene in seed_genes:
+                if seed_gene in gene_set:
+                    for other_gene in gene_set:
+                        if other_gene != seed_gene:
+                            cooccurrence[seed_gene][other_gene] += 1
+        
+        normalized = {}
+        for seed_gene, neighbors in cooccurrence.items():
+            max_count = max(neighbors.values()) if neighbors else 1
+            normalized[seed_gene] = {
+                gene: count / max_count
+                for gene, count in neighbors.items()
+            }
+        
+        return normalized
+    
     def _make_id(self, name: str) -> str:
-        """Convert name to valid ID"""
         return name.upper().replace(' ', '_').replace('-', '_').replace('/', '_')
 
 
 # ============================================================
-# SEMANTIC SEARCH WITH SIMILARITY TRACKING
+# SEMANTIC SEARCH
 # ============================================================
 
 @st.cache_resource
@@ -258,16 +263,9 @@ def semantic_search_with_scores(
     model,
     top_k: int = 50
 ) -> Tuple[Dict[str, List[str]], Dict[str, float]]:
-    """
-    Find relevant pathways AND return similarity scores.
+    """Find relevant pathways with similarity scores"""
     
-    CRITICAL: We need scores for gene relevance calculation!
-    
-    Returns:
-        (selected_pathways, pathway_similarities)
-    """
     if model is None:
-        # Fallback: keyword matching with simple scores
         query_terms = set(query.lower().split())
         matches = {}
         scores = {}
@@ -283,27 +281,22 @@ def semantic_search_with_scores(
         
         return matches, scores
     
-    # Compute query embedding
     query_emb = model.encode(query, convert_to_numpy=True)
     
-    # Score all pathways
     pathway_scores = []
     for pid, genes in pathways_dict.items():
         text = f"{pid.replace('_', ' ')} {' '.join(genes[:10])}"
         pathway_emb = model.encode(text, convert_to_numpy=True)
         
-        # Cosine similarity
         similarity = float(np.dot(query_emb, pathway_emb) / (
             np.linalg.norm(query_emb) * np.linalg.norm(pathway_emb) + 1e-8
         ))
         
         pathway_scores.append((pid, similarity))
     
-    # Sort and select top K
     pathway_scores.sort(key=lambda x: x[1], reverse=True)
     top_pathways = pathway_scores[:top_k]
     
-    # Return both pathways and scores
     selected_pathways = {pid: pathways_dict[pid] for pid, _ in top_pathways}
     similarity_dict = {pid: score for pid, score in top_pathways}
     
@@ -311,223 +304,68 @@ def semantic_search_with_scores(
 
 
 # ============================================================
-# MECHANISM-LEVEL DECOMPOSITION
+# LLM FUNCTIONS
 # ============================================================
 
-def decompose_query_mechanism_level(
+def decompose_with_granularity(
     query: str,
-    target_count: int,
-    hf_token: Optional[str] = None
-) -> List[Dict[str, str]]:
-    """
-    Decompose query into MECHANISM-LEVEL facets (not category-level).
+    granularity_count: int,
+    hf_token: str
+) -> Optional[DecompositionResult]:
+    """Use Qwen2.5-72B to decompose query into EXACTLY N mechanisms"""
     
-    CRITICAL FIX: Each facet must be a specific molecular mechanism,
-    not a broad biological category.
-    
-    Examples:
-    ✅ GOOD: "Immune checkpoint exhaustion", "Glycolytic enzyme upregulation"
-    ❌ BAD: "Metabolic context", "Regulatory pathways"
-    """
-    query_lower = query.lower()
-    
-    # T-CELL EXHAUSTION: Specific mechanisms
-    if 't cell' in query_lower and ('exhaust' in query_lower or 'dysfunction' in query_lower):
-        facets = [
-            {
-                'facet_id': 'F1',
-                'facet_name': 'Immune Checkpoint Exhaustion',
-                'mechanism_queries': ['PD-1 CTLA-4 TIGIT LAG3 checkpoint exhaustion']
-            },
-            {
-                'facet_id': 'F2',
-                'facet_name': 'Glycolytic Enzyme Upregulation',
-                'mechanism_queries': ['LDHA HK2 PKM2 PFKFB3 glycolysis lactate']
-            },
-            {
-                'facet_id': 'F3',
-                'facet_name': 'Mitochondrial Respiratory Dysfunction',
-                'mechanism_queries': ['mitochondrial oxidative phosphorylation electron transport']
-            },
-            {
-                'facet_id': 'F4',
-                'facet_name': 'Exhaustion Transcription Program',
-                'mechanism_queries': ['TOX NFATC1 PRDM1 EOMES transcription factor exhaustion']
-            },
-            {
-                'facet_id': 'F5',
-                'facet_name': 'Epigenetic Silencing Markers',
-                'mechanism_queries': ['DNA methylation histone modification chromatin remodeling']
-            },
-            {
-                'facet_id': 'F6',
-                'facet_name': 'Inhibitory Cytokine Signaling',
-                'mechanism_queries': ['IL10 TGFB1 IL35 suppressive cytokine']
-            },
-            {
-                'facet_id': 'F7',
-                'facet_name': 'Effector Function Loss',
-                'mechanism_queries': ['GZMB PRF1 IFNG effector cytotoxicity loss']
-            },
-            {
-                'facet_id': 'F8',
-                'facet_name': 'Metabolic Checkpoint Integration',
-                'mechanism_queries': ['mTOR AMPK metabolic sensing exhaustion']
-            },
-        ]
-    
-    # MACROPHAGE: Specific mechanisms
-    elif 'macrophage' in query_lower or 'tam' in query_lower:
-        facets = [
-            {
-                'facet_id': 'F1',
-                'facet_name': 'M1 Inflammatory Activation',
-                'mechanism_queries': ['NOS2 TNF IL12 IL6 M1 inflammatory']
-            },
-            {
-                'facet_id': 'F2',
-                'facet_name': 'M2 Alternative Activation',
-                'mechanism_queries': ['ARG1 IL10 CD163 CD206 M2 alternative']
-            },
-            {
-                'facet_id': 'F3',
-                'facet_name': 'Phagocytic Receptor Expression',
-                'mechanism_queries': ['MARCO MERTK CD36 phagocytosis clearance']
-            },
-            {
-                'facet_id': 'F4',
-                'facet_name': 'Inflammatory Cytokine Production',
-                'mechanism_queries': ['IL1B IL6 TNF CXCL8 cytokine macrophage']
-            },
-            {
-                'facet_id': 'F5',
-                'facet_name': 'Antigen Presentation Machinery',
-                'mechanism_queries': ['HLA CD80 CD86 MHC antigen presentation']
-            },
-            {
-                'facet_id': 'F6',
-                'facet_name': 'Tissue Remodeling Enzymes',
-                'mechanism_queries': ['MMP9 MMP2 MMP12 matrix remodeling']
-            },
-            {
-                'facet_id': 'F7',
-                'facet_name': 'Metabolic Reprogramming M1/M2',
-                'mechanism_queries': ['HIF1A glycolysis OXPHOS metabolic macrophage']
-            },
-        ]
-    
-    # CANCER METABOLISM: Specific mechanisms
-    elif 'cancer' in query_lower and 'metab' in query_lower:
-        facets = [
-            {
-                'facet_id': 'F1',
-                'facet_name': 'Warburg Effect Enzymes',
-                'mechanism_queries': ['LDHA PKM2 HK2 aerobic glycolysis Warburg']
-            },
-            {
-                'facet_id': 'F2',
-                'facet_name': 'Glutaminolysis Pathway',
-                'mechanism_queries': ['GLS GLS2 glutamine glutaminolysis GLUD1']
-            },
-            {
-                'facet_id': 'F3',
-                'facet_name': 'De Novo Lipogenesis',
-                'mechanism_queries': ['FASN ACLY ACC lipid synthesis fatty acid']
-            },
-            {
-                'facet_id': 'F4',
-                'facet_name': 'One-Carbon Metabolism',
-                'mechanism_queries': ['MTHFD2 SHMT serine glycine folate']
-            },
-            {
-                'facet_id': 'F5',
-                'facet_name': 'TCA Cycle Rewiring',
-                'mechanism_queries': ['IDH1 IDH2 SDH FH TCA cycle']
-            },
-            {
-                'facet_id': 'F6',
-                'facet_name': 'Pentose Phosphate Shunt',
-                'mechanism_queries': ['G6PD TKT TALDO1 pentose phosphate NADPH']
-            },
-        ]
-    
-    # GENERIC: Create mechanism-level facets
-    else:
-        # Try LLM if token available
-        if hf_token:
-            llm_facets = try_llm_decomposition(query, target_count, hf_token)
-            if llm_facets:
-                return llm_facets
-        
-        # Fallback: Create enough mechanism-level facets
-        num_facets = max(6, (target_count + 2) // 3)
-        facets = [
-            {
-                'facet_id': f'F{i+1}',
-                'facet_name': f'Mechanism {i+1}',
-                'mechanism_queries': [query]
-            }
-            for i in range(num_facets)
-        ]
-    
-    return facets
-
-
-def try_llm_decomposition(query: str, target_count: int, hf_token: str) -> Optional[List[Dict[str, str]]]:
-    """
-    Use LLM to decompose query into mechanism-level facets.
-    
-    CRITICAL: Prompt must enforce mechanism-level granularity!
-    """
     try:
         from huggingface_hub import InferenceClient
         
         client = InferenceClient(token=hf_token)
         
-        # CORRECTED PROMPT: Forces mechanism-level thinking
-        prompt = f"""Decompose this biological query into 6-8 SPECIFIC MOLECULAR MECHANISMS.
+        prompt = f"""Decompose this biological query into EXACTLY {granularity_count} SPECIFIC, NON-OVERLAPPING molecular mechanisms.
 
 Query: "{query}"
-Target: {target_count} gene signatures total
 
 REQUIREMENTS:
-- Each facet must be a SPECIFIC molecular mechanism (not a broad category)
-- Each mechanism should involve 10-20 key genes
-- Focus on mechanistic processes, not general biology
+1. Generate EXACTLY {granularity_count} mechanisms (no more, no less)
+2. Each mechanism must be maximally granular (10-20 genes per mechanism)
+3. No overlap between mechanisms
+4. Each mechanism must be biologically distinct and specific
 
-EXAMPLES OF GOOD MECHANISMS:
-✅ "Immune checkpoint receptor upregulation" (PD-1, CTLA-4, LAG3, TIGIT)
-✅ "Glycolytic enzyme activation" (LDHA, HK2, PKM2, PFKFB3)
-✅ "Mitochondrial respiratory chain dysfunction" (Complex I-IV genes)
-✅ "Exhaustion-specific transcription factors" (TOX, NFATC1, PRDM1)
+EXAMPLE for "glycolysis in macrophage in colorectal cancer" with count={granularity_count}:
+If {granularity_count}=9, generate:
+1. Macrophage metabolic changes in cancer
+2. Macrophage stress responses in cancer
+3. Macrophage effects in colorectal cancer tissue
+4. Mitochondrial expression changes in macrophages
+5. Fatty acid metabolism alterations
+6. ROS production changes in cancer-associated macrophages
+7. OXPHOS pathway changes in tumor macrophages
+8. Other metabolic pathway alterations
+9. Colorectal-specific metabolism markers in macrophages
 
-EXAMPLES OF BAD (TOO BROAD):
-❌ "Metabolic context"
-❌ "Regulatory pathways"
-❌ "Signaling networks"
-
-Output JSON only:
+Output JSON ONLY (no preamble, no markdown):
 {{
   "facets": [
     {{
       "facet_id": "F1",
-      "facet_name": "Immune Checkpoint Receptor Upregulation",
-      "mechanism_queries": ["PD-1 PDCD1 CTLA4 LAG3 TIGIT checkpoint exhaustion"]
+      "facet_name": "Macrophage Metabolic Changes in Cancer",
+      "mechanism_queries": ["macrophage metabolism cancer glycolysis glucose"]
     }},
-    ...
+    {{
+      "facet_id": "F2",
+      "facet_name": "...",
+      "mechanism_queries": ["..."]
+    }}
   ]
 }}"""
 
         response = client.chat_completion(
             messages=[{"role": "user", "content": prompt}],
             model="Qwen/Qwen2.5-72B-Instruct",
-            max_tokens=2000,
-            temperature=0.2
+            max_tokens=3000,
+            temperature=0.3
         )
         
         raw = response.choices[0].message.content
         
-        # Parse JSON
         cleaned = raw.strip()
         if '```json' in cleaned:
             cleaned = cleaned.split('```json')[1].split('```')[0].strip()
@@ -542,15 +380,121 @@ Output JSON only:
                 cleaned = cleaned[start:]
         
         data = json.loads(cleaned)
-        return data.get('facets', None)
+        facets = data.get('facets', [])
+        
+        return DecompositionResult(
+            facets=facets,
+            granularity_level=granularity_count,
+            timestamp=datetime.now().isoformat(),
+            llm_model="Qwen/Qwen2.5-72B-Instruct"
+        )
         
     except Exception as e:
-        st.warning(f"LLM decomposition failed: {e}")
+        st.error(f"LLM decomposition failed: {e}")
         return None
 
 
+def verify_signature_with_llm2(
+    signature: GeneSignature,
+    original_query: str,
+    mode: str,
+    llm2_model: str,
+    hf_token: str,
+    context_options: List[str]
+) -> Dict[str, Any]:
+    """Use biomedical LLM to verify/expand signature"""
+    
+    try:
+        from huggingface_hub import InferenceClient
+        
+        client = InferenceClient(token=hf_token)
+        
+        context_parts = []
+        
+        if "Original query context" in context_options or "All of the above" in context_options:
+            context_parts.append(f"Original Query: {original_query}")
+        
+        if "Mechanism description" in context_options or "All of the above" in context_options:
+            context_parts.append(f"Mechanism: {signature.mechanism}")
+        
+        if "Pathway sources used" in context_options or "All of the above" in context_options:
+            context_parts.append(f"Source Pathways: {', '.join(signature.source_pathways)}")
+        
+        context_parts.append(f"Current Genes ({len(signature.genes)}): {', '.join(signature.genes)}")
+        
+        context = "\n".join(context_parts)
+        
+        if mode == "verify_only":
+            prompt = f"""Review this gene signature for biological correctness.
+
+{context}
+
+Task: Identify genes that do NOT belong in this signature based on biological relevance to the mechanism.
+
+Output JSON only:
+{{
+  "genes_to_remove": ["GENE1", "GENE2"],
+  "reasoning": {{
+    "GENE1": "Explanation why this gene should be removed",
+    "GENE2": "Explanation..."
+  }}
+}}
+
+If all genes are correct, return empty list for genes_to_remove."""
+
+        else:
+            prompt = f"""Review this gene signature and suggest improvements.
+
+{context}
+
+Task:
+1. Identify genes that do NOT belong (if any)
+2. Suggest genes that SHOULD be added to better represent this mechanism (limit to 5 suggestions)
+
+Output JSON only:
+{{
+  "genes_to_remove": ["GENE1"],
+  "genes_to_add": ["GENE3", "GENE4"],
+  "reasoning": {{
+    "GENE1": "Why remove",
+    "GENE3": "Why add",
+    "GENE4": "Why add"
+  }}
+}}"""
+
+        response = client.chat_completion(
+            messages=[{"role": "user", "content": prompt}],
+            model=llm2_model,
+            max_tokens=1500,
+            temperature=0.2
+        )
+        
+        raw = response.choices[0].message.content
+        
+        cleaned = raw.strip()
+        if '```json' in cleaned:
+            cleaned = cleaned.split('```json')[1].split('```')[0].strip()
+        elif '```' in cleaned:
+            parts = cleaned.split('```')
+            if len(parts) >= 3:
+                cleaned = parts[1].strip()
+        
+        if not cleaned.startswith('{'):
+            start = cleaned.find('{')
+            if start != -1:
+                cleaned = cleaned[start:]
+        
+        result = json.loads(cleaned)
+        
+        return result
+        
+    except Exception as e:
+        st.error(f"LLM #2 verification failed: {e}")
+        return {"genes_to_remove": [], "genes_to_add": [], "reasoning": {}}
+
+
 # ============================================================
-# UI & SESSION STATE
+# UI STYLING
 # ============================================================
 
 def inject_modern_css():
@@ -588,9 +532,21 @@ def inject_modern_css():
         margin: 16px 0;
         color: #e2e8f0;
     }
+    .success-box {
+        background: rgba(16, 185, 129, 0.1);
+        border-left: 4px solid #10b981;
+        padding: 16px;
+        border-radius: 8px;
+        margin: 16px 0;
+        color: #e2e8f0;
+    }
     </style>
     """, unsafe_allow_html=True)
 
+
+# ============================================================
+# SESSION STATE
+# ============================================================
 
 def initialize_session_state():
     defaults = {
@@ -598,7 +554,13 @@ def initialize_session_state():
         'token_validated': False,
         'kb_path': None,
         'kb_loaded': False,
-        'results': None,
+        'decomposition_result': None,
+        'granularity_approved': False,
+        'semantic_signatures': None,
+        'dam_expanded_signatures': None,
+        'llm2_suggestions': {},
+        'verified_signatures': None,
+        'final_approved_signatures': [],
         'execution_complete': False,
     }
     
@@ -638,138 +600,7 @@ def load_knowledge_base() -> Optional[Dict[str, List[str]]]:
 
 
 # ============================================================
-# MAIN PIPELINE - BIOLOGICALLY CORRECTED
-# ============================================================
-
-def generate_signatures(
-    query: str,
-    target_count: int,
-    min_genes: int,
-    max_genes: int,
-    hf_token: Optional[str] = None
-):
-    """
-    CORRECTED signature generation pipeline.
-    
-    BIOLOGICAL FIXES:
-    1. Mechanism-level decomposition
-    2. Gene relevance scoring (not frequency)
-    3. Strict size limits enforced
-    4. Multiple mechanisms per facet
-    """
-    progress_bar = st.progress(0)
-    status = st.empty()
-    
-    try:
-        # Load KB
-        status.info("📚 Loading knowledge base...")
-        progress_bar.progress(10)
-        
-        pathways_dict = load_knowledge_base()
-        if not pathways_dict:
-            st.error("Cannot load knowledge base")
-            return
-        
-        status.info(f"   Loaded {len(pathways_dict):,} pathways")
-        
-        # MECHANISM-LEVEL DECOMPOSITION
-        status.info("🧠 Decomposing into molecular mechanisms...")
-        progress_bar.progress(20)
-        
-        facets = decompose_query_mechanism_level(query, target_count, hf_token)
-        status.info(f"   Created {len(facets)} mechanism-level facets")
-        
-        # Load embedding model
-        status.info("🔍 Loading semantic search...")
-        embedding_model = load_embedding_model()
-        progress_bar.progress(30)
-        
-        # Build signatures with RELEVANCE SCORING
-        status.info("🧬 Building signatures with relevance scoring...")
-        
-        builder = SignatureBuilder(min_genes=min_genes, max_genes=max_genes)
-        all_signatures = []
-        
-        # Calculate mechanisms per facet to reach target
-        mechanisms_per_facet = max(1, target_count // len(facets))
-        
-        for i, facet in enumerate(facets):
-            facet_name = facet['facet_name']
-            
-            # Get all mechanism queries for this facet
-            mechanism_queries = facet.get('mechanism_queries', [facet_name])
-            
-            for mech_query in mechanism_queries[:mechanisms_per_facet]:
-                status.info(f"   Building: {facet_name}...")
-                
-                # Find relevant pathways WITH SIMILARITY SCORES
-                relevant_pathways, pathway_similarities = semantic_search_with_scores(
-                    mech_query,
-                    pathways_dict,
-                    embedding_model,
-                    top_k=50
-                )
-                
-                if not relevant_pathways:
-                    continue
-                
-                # Build multiple mechanism signatures
-                mechanism_sigs = builder.build_multiple_mechanism_signatures(
-                    facet_name,
-                    relevant_pathways,
-                    pathway_similarities,
-                    num_mechanisms=mechanisms_per_facet
-                )
-                
-                all_signatures.extend(mechanism_sigs)
-                
-                # Stop if we have enough
-                if len(all_signatures) >= target_count:
-                    break
-            
-            # Update progress
-            progress = 30 + int((i + 1) / len(facets) * 60)
-            progress_bar.progress(progress)
-            
-            if len(all_signatures) >= target_count:
-                break
-        
-        # Ensure exact target count
-        if len(all_signatures) > target_count:
-            # Sort by confidence and take top N
-            all_signatures.sort(key=lambda s: s.confidence, reverse=True)
-            all_signatures = all_signatures[:target_count]
-        
-        status.success(f"✅ Generated {len(all_signatures)} mechanism-specific signatures!")
-        progress_bar.progress(100)
-        
-        # Store results
-        st.session_state.results = {
-            'query': query,
-            'target_count': target_count,
-            'min_genes': min_genes,
-            'max_genes': max_genes,
-            'signatures': [sig.to_dict() for sig in all_signatures],
-            'total_signatures': len(all_signatures),
-            'facets': facets,
-            'timestamp': datetime.now().isoformat()
-        }
-        
-        st.session_state.execution_complete = True
-        st.balloons()
-        
-        time.sleep(1)
-        st.rerun()
-        
-    except Exception as e:
-        status.error(f"❌ Generation failed: {e}")
-        import traceback
-        st.code(traceback.format_exc())
-        progress_bar.empty()
-
-
-# ============================================================
-# UI TABS
+# SIDEBAR
 # ============================================================
 
 def render_sidebar():
@@ -777,10 +608,13 @@ def render_sidebar():
     with st.sidebar:
         st.markdown("### 🔧 Configuration")
         
-        with st.expander("🔑 HF Token (Optional)", expanded=False):
-            st.caption("For LLM-based mechanism decomposition")
+        with st.expander("🔑 HuggingFace Token (Required)", expanded=not st.session_state.token_validated):
+            st.caption("One token accesses both LLMs")
+            st.caption("• Qwen2.5-72B (decomposition)")
+            st.caption("• BioMedLM (verification)")
+            
             token_input = st.text_input(
-                "Hugging Face Token",
+                "HuggingFace Token",
                 type="password",
                 value=st.session_state.hf_token or "",
                 help="Get token at huggingface.co/settings/tokens"
@@ -793,28 +627,44 @@ def render_sidebar():
                     st.session_state.hf_token = token_input
                     st.session_state.token_validated = True
                     st.success("✅ Valid!")
+                    time.sleep(0.5)
+                    st.rerun()
                 except:
-                    st.error("❌ Invalid")
+                    st.error("❌ Invalid token")
+        
+        if st.session_state.token_validated:
+            st.success("🔓 Token Active")
         
         st.markdown("---")
-        st.markdown("### ℹ️ About")
+        st.markdown("### ℹ️ Pipeline Layers")
         st.caption("""
-        **Biological Signature Generator**
+        **1. 🧠 Granularity Control**
+        LLM decomposes query
         
-        Generates mechanism-specific gene signatures using:
-        - Mechanism-level decomposition
-        - Gene relevance scoring
-        - Strict size constraints (10-20 genes)
+        **2. 🔍 Semantic Selection**
+        Build signatures from pathways
+        
+        **3. 🔬 DAM Expansion** *(Optional)*
+        Add mathematical neighbors
+        
+        **4. ✅ LLM Verification** *(Optional)*
+        Verify & expand genes
+        
+        **5. 👤 User Approval**
+        Review & approve each signature
         """)
 
+
+# ============================================================
+# KB TAB
+# ============================================================
 
 def render_kb_tab():
     st.markdown("## 📚 Knowledge Base")
     
     st.markdown("""
     <div class="info-box">
-    The knowledge base contains pathways used as SOURCE MATERIAL for signature generation.
-    Pathways are NOT the end product - they provide gene pools for building signatures.
+    Pathways are SOURCE MATERIAL for building signatures.
     </div>
     """, unsafe_allow_html=True)
     
@@ -831,43 +681,41 @@ def render_kb_tab():
             st.caption(f"Genes: {', '.join(sample_genes[:10])}... ({len(sample_genes)} total)")
 
 
+# ============================================================
+# GENERATION TAB - COMPLETE
+# ============================================================
+
 def render_generation_tab():
-    st.markdown("## 🧬 Generate Signatures")
+    st.markdown("## 🧬 Multi-Layer Signature Generation")
     
     if not st.session_state.kb_loaded:
-        st.warning("⚠️ Please load knowledge base first (go to Knowledge Base tab)")
+        st.warning("⚠️ Please load knowledge base first")
         return
     
-    st.markdown("""
-    <div class="info-box">
-    <strong>How this works (CORRECTED):</strong><br><br>
-    
-    1. Query decomposed into <strong>molecular mechanisms</strong> (not categories)<br>
-    2. Genes scored by <strong>relevance</strong> (not frequency)<br>
-    3. Each signature limited to <strong>10-20 genes</strong> (strictly enforced)<br>
-    4. Multiple mechanism signatures per facet to reach target count
-    </div>
-    """, unsafe_allow_html=True)
+    if not st.session_state.token_validated:
+        st.warning("⚠️ Please validate HuggingFace token in sidebar")
+        return
     
     # Query input
+    st.markdown("### Research Question")
     query = st.text_area(
-        "Research Question",
+        "",
         height=80,
-        placeholder="Example: T cell exhaustion in pancreatic cancer\nExample: Macrophage polarization in tumor microenvironment\nExample: Cancer metabolic reprogramming",
-        help="Describe your biological question"
+        placeholder="Example: glycolysis metabolism changes in Macrophage in colorectal cancer",
+        help="Describe your biological question",
+        key="main_query"
     )
     
-    # Controls
+    # Gene constraints
     col1, col2, col3 = st.columns(3)
     
     with col1:
         target_count = st.number_input(
-            "Number of Signatures",
+            "Total Signatures",
             min_value=5,
             max_value=100,
             value=35,
-            step=5,
-            help="Total gene signatures to generate"
+            step=5
         )
     
     with col2:
@@ -875,8 +723,7 @@ def render_generation_tab():
             "Min Genes/Signature",
             min_value=5,
             max_value=30,
-            value=10,
-            help="Minimum genes per signature (hard limit)"
+            value=10
         )
     
     with col3:
@@ -884,128 +731,580 @@ def render_generation_tab():
             "Max Genes/Signature",
             min_value=10,
             max_value=50,
-            value=20,
-            help="Maximum genes per signature (hard limit)"
+            value=20
         )
     
-    # Validation
     if min_genes >= max_genes:
         st.error("❌ Min genes must be less than max genes!")
         return
     
-    st.markdown(f"""
-    <div class="warning-box">
-    <strong>Configuration:</strong> Will generate <strong>{target_count} signatures</strong>, 
-    each with exactly <strong>{min_genes}-{max_genes} genes</strong>.
-    Gene limits are STRICTLY ENFORCED during construction.
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown("---")
     
-    # Generate button
-    if st.button("🚀 Generate Signatures", type="primary", use_container_width=True):
-        if not query or not query.strip():
-            st.error("Please enter a research question")
-            return
-        
-        generate_signatures(
-            query,
-            target_count,
-            min_genes,
-            max_genes,
-            st.session_state.hf_token if st.session_state.token_validated else None
-        )
-
-
-def render_results_tab():
-    if not st.session_state.execution_complete:
-        st.info("ℹ️ No results yet. Generate signatures first.")
+    # LAYER 1
+    render_layer1_granularity(query, target_count, min_genes, max_genes)
+    
+    if not st.session_state.granularity_approved:
         return
     
-    results = st.session_state.results
+    # LAYER 2
+    render_layer2_semantic(query, min_genes, max_genes)
     
-    st.markdown("## 📊 Generated Signatures")
+    if not st.session_state.semantic_signatures:
+        return
     
-    st.markdown(f"""
+    # LAYER 3
+    render_layer3_dam()
+    
+    # LAYER 4
+    render_layer4_verification(query)
+    
+    # LAYER 5
+    render_layer5_approval()
+
+
+def render_layer1_granularity(query, target_count, min_genes, max_genes):
+    """Layer 1: Granularity control"""
+    
+    st.markdown("### 🧠 Layer 1: Granularity Control")
+    
+    st.markdown("""
     <div class="info-box">
-    <strong>Generated {results['total_signatures']} mechanism-specific signatures</strong><br>
-    Query: {results['query']}<br>
-    Gene range: {results['min_genes']}-{results['max_genes']} per signature
+    <strong>LLM (Qwen2.5-72B)</strong> decomposes your query into granular mechanisms.
+    Use the slider to control how many mechanisms.
     </div>
     """, unsafe_allow_html=True)
     
-    # Summary metrics
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Signatures", results['total_signatures'])
-    with col2:
-        st.metric("Target", results['target_count'])
-    with col3:
-        gene_counts = [s['gene_count'] for s in results['signatures']]
-        avg_genes = np.mean(gene_counts)
-        st.metric("Avg Genes", f"{avg_genes:.1f}")
-    with col4:
-        total_unique = len(set().union(*[set(s['genes']) for s in results['signatures']]))
-        st.metric("Unique Genes", total_unique)
+    granularity_level = st.slider(
+        "Number of granular mechanisms:",
+        min_value=3,
+        max_value=60,
+        value=9,
+        step=1,
+        help="Higher = more specific mechanisms"
+    )
     
-    # Signature table
-    with st.expander("🧬 Signature Details", expanded=True):
-        sig_data = []
-        for sig in results['signatures']:
-            sig_data.append({
-                'ID': sig['signature_id'],
-                'Name': sig['signature_name'],
-                'Facet': sig['facet'],
-                'Mechanism': sig['mechanism'],
-                'Genes': sig['gene_count'],
-                'Confidence': f"{sig['confidence']:.3f}",
-                'Top Genes': ', '.join(sig['top_genes'])
-            })
-        
-        df = pd.DataFrame(sig_data)
-        st.dataframe(df, use_container_width=True, height=400)
-    
-    # Distribution
-    with st.expander("📊 Facet Distribution"):
-        facet_counts = Counter([s['facet'] for s in results['signatures']])
-        facet_df = pd.DataFrame([
-            {'Facet': k, 'Count': v}
-            for k, v in facet_counts.most_common()
-        ])
-        st.bar_chart(facet_df.set_index('Facet'))
-    
-    # Downloads
-    st.markdown("### 💾 Downloads")
+    st.caption(f"💡 **{granularity_level} mechanisms** × 3 variants = ~{granularity_level * 3} signatures")
     
     col1, col2 = st.columns(2)
     
     with col1:
-        # GMT format
-        gmt_lines = []
-        for sig in results['signatures']:
-            sig_id = sig['signature_id']
-            desc = f"{sig['facet']}|{sig['mechanism']}|{sig['gene_count']}genes|conf:{sig['confidence']:.3f}"
-            genes = '\t'.join(sig['genes'])
-            gmt_lines.append(f"{sig_id}\t{desc}\t{genes}")
-        
-        gmt_content = '\n'.join(gmt_lines)
-        
-        st.download_button(
-            "📥 Download GMT",
-            data=gmt_content,
-            file_name=f"signatures_{datetime.now().strftime('%Y%m%d_%H%M%S')}.gmt",
-            mime="text/plain",
-            use_container_width=True
-        )
+        if st.button("🎯 Generate Decomposition", type="primary", use_container_width=True):
+            if not query or not query.strip():
+                st.error("Please enter a query first")
+                return
+            
+            with st.spinner(f"🧠 LLM generating {granularity_level} mechanisms..."):
+                result = decompose_with_granularity(
+                    query,
+                    granularity_level,
+                    st.session_state.hf_token
+                )
+                
+                if result and result.facets:
+                    st.session_state.decomposition_result = result
+                    st.session_state.granularity_approved = False
+                    st.success(f"✅ Generated {len(result.facets)} mechanisms!")
+                    time.sleep(0.5)
+                    st.rerun()
     
     with col2:
-        # JSON format
-        st.download_button(
-            "📥 Download JSON",
-            data=json.dumps(results, indent=2),
-            file_name=f"signatures_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-            mime="application/json",
-            use_container_width=True
+        if st.session_state.decomposition_result:
+            if st.button("🔄 Regenerate", use_container_width=True):
+                st.session_state.decomposition_result = None
+                st.session_state.granularity_approved = False
+                st.rerun()
+    
+    if st.session_state.decomposition_result:
+        st.markdown("---")
+        st.markdown("#### 📋 Generated Mechanisms:")
+        
+        result = st.session_state.decomposition_result
+        
+        for i, facet in enumerate(result.facets, 1):
+            with st.expander(f"{i}. {facet['facet_name']}", expanded=(i <= 3)):
+                st.caption(f"**Query:** {', '.join(facet.get('mechanism_queries', []))}")
+        
+        st.markdown(f"""
+        <div class="warning-box">
+        <strong>⚠️ Review {len(result.facets)} mechanisms above.</strong><br>
+        Satisfied? Click "Approve". Need more granularity? Adjust slider & regenerate.
+        </div>
+        """, unsafe_allow_html=True)
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("✅ Approve & Continue", type="primary", use_container_width=True):
+                st.session_state.granularity_approved = True
+                st.session_state['target_count'] = target_count
+                st.success("✅ Mechanisms approved!")
+                time.sleep(0.5)
+                st.rerun()
+        
+        with col2:
+            if st.button("❌ Reject", use_container_width=True):
+                st.session_state.decomposition_result = None
+                st.session_state.granularity_approved = False
+                st.rerun()
+
+
+def render_layer2_semantic(query, min_genes, max_genes):
+    """Layer 2: Semantic selection"""
+    
+    st.markdown("---")
+    st.markdown("### 🔍 Layer 2: Semantic Signature Building")
+    
+    st.markdown(f"""
+    <div class="info-box">
+    Building signatures: Semantic search → Gene scoring → Size limits ({min_genes}-{max_genes} genes)
+    </div>
+    """, unsafe_allow_html=True)
+    
+    if st.button("🚀 Build Semantic Signatures", type="primary", use_container_width=True):
+        
+        progress_bar = st.progress(0)
+        status = st.empty()
+        
+        try:
+            status.info("📚 Loading knowledge base...")
+            progress_bar.progress(10)
+            
+            pathways_dict = load_knowledge_base()
+            if not pathways_dict:
+                st.error("Cannot load KB")
+                return
+            
+            status.info("🔍 Loading semantic search...")
+            progress_bar.progress(20)
+            
+            embedding_model = load_embedding_model()
+            
+            status.info("🧬 Building signatures...")
+            progress_bar.progress(30)
+            
+            builder = SignatureBuilder(min_genes=min_genes, max_genes=max_genes)
+            all_signatures = []
+            
+            facets = st.session_state.decomposition_result.facets
+            
+            for i, facet in enumerate(facets):
+                facet_name = facet['facet_name']
+                mechanism_queries = facet.get('mechanism_queries', [facet_name])
+                
+                status.info(f"   {facet_name}...")
+                
+                for mech_query in mechanism_queries[:1]:
+                    relevant_pathways, pathway_similarities = semantic_search_with_scores(
+                        mech_query,
+                        pathways_dict,
+                        embedding_model,
+                        top_k=50
+                    )
+                    
+                    if not relevant_pathways:
+                        continue
+                    
+                    mechanism_sigs = builder.build_multiple_mechanisms(
+                        facet_name,
+                        relevant_pathways,
+                        pathway_similarities,
+                        num_variants=3
+                    )
+                    
+                    all_signatures.extend(mechanism_sigs)
+                
+                progress = 30 + int((i + 1) / len(facets) * 50)
+                progress_bar.progress(progress)
+            
+            target_count = st.session_state.get('target_count', 35)
+            if len(all_signatures) > target_count:
+                all_signatures.sort(key=lambda s: s.confidence, reverse=True)
+                all_signatures = all_signatures[:target_count]
+            
+            status.success(f"✅ Built {len(all_signatures)} signatures!")
+            progress_bar.progress(100)
+            
+            st.session_state.semantic_signatures = all_signatures
+            
+            time.sleep(1)
+            st.rerun()
+            
+        except Exception as e:
+            status.error(f"❌ Failed: {e}")
+            progress_bar.empty()
+    
+    if st.session_state.semantic_signatures:
+        st.markdown(f"""
+        <div class="success-box">
+        ✅ <strong>{len(st.session_state.semantic_signatures)} semantic signatures built</strong>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        gene_counts = [len(sig.genes) for sig in st.session_state.semantic_signatures]
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric("Signatures", len(st.session_state.semantic_signatures))
+        with col2:
+            st.metric("Avg Genes", f"{np.mean(gene_counts):.1f}")
+        with col3:
+            st.metric("Range", f"{min(gene_counts)}-{max(gene_counts)}")
+
+
+def render_layer3_dam():
+    """Layer 3: DAM expansion"""
+    
+    st.markdown("---")
+    st.markdown("### 🔬 Layer 3: DAM Expansion (Optional)")
+    
+    st.markdown("""
+    <div class="info-box">
+    <strong>Optional:</strong> Add mathematically related genes based on co-occurrence.
+    </div>
+    """, unsafe_allow_html=True)
+    
+    enable_dam = st.checkbox(
+        "🔬 Enable DAM Neighbor Expansion",
+        value=False,
+        help="Add related genes"
+    )
+    
+    if enable_dam:
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            expansion_strength = st.slider(
+                "Expansion strength",
+                min_value=0.1,
+                max_value=1.0,
+                value=0.5,
+                step=0.1
+            )
+        
+        with col2:
+            max_neighbors = st.slider(
+                "Max neighbors",
+                min_value=1,
+                max_value=10,
+                value=5,
+                step=1
+            )
+        
+        if st.button("🔬 Expand with DAM", type="primary", use_container_width=True):
+            
+            if not st.session_state.semantic_signatures:
+                st.error("Build semantic signatures first")
+                return
+            
+            pathways_dict = load_knowledge_base()
+            builder = SignatureBuilder()
+            expanded_signatures = []
+            
+            progress_bar = st.progress(0)
+            
+            for i, sig in enumerate(st.session_state.semantic_signatures):
+                expanded_sig = GeneSignature(
+                    signature_id=sig.signature_id,
+                    signature_name=sig.signature_name,
+                    genes=sig.genes.copy(),
+                    facet=sig.facet,
+                    mechanism=sig.mechanism,
+                    confidence=sig.confidence,
+                    gene_scores=sig.gene_scores.copy(),
+                    source_pathways=sig.source_pathways.copy()
+                )
+                
+                expanded_sig = builder.expand_with_dam(
+                    expanded_sig,
+                    pathways_dict,
+                    expansion_strength=expansion_strength,
+                    max_additional=max_neighbors
+                )
+                
+                expanded_signatures.append(expanded_sig)
+                progress_bar.progress((i + 1) / len(st.session_state.semantic_signatures))
+            
+            st.session_state.dam_expanded_signatures = expanded_signatures
+            st.success(f"✅ Expanded {len(expanded_signatures)} signatures!")
+            
+            time.sleep(1)
+            st.rerun()
+        
+        if st.session_state.dam_expanded_signatures:
+            st.success("✅ DAM expansion complete")
+    
+    else:
+        st.info("DAM disabled")
+        st.session_state.dam_expanded_signatures = None
+
+
+def render_layer4_verification(query):
+    """Layer 4: LLM verification"""
+    
+    st.markdown("---")
+    st.markdown("### ✅ Layer 4: LLM Verification (Optional)")
+    
+    st.markdown("""
+    <div class="info-box">
+    <strong>Optional:</strong> Use BioMedLM to verify genes and suggest additions.
+    </div>
+    """, unsafe_allow_html=True)
+    
+    verification_mode = st.radio(
+        "Verification mode:",
+        options=[
+            "None (Skip)",
+            "Verify Only",
+            "Verify + Expand"
+        ],
+        index=0
+    )
+    
+    if verification_mode != "None (Skip)":
+        
+        llm2_model = st.selectbox(
+            "Select model:",
+            options=[
+                "stanford-crfm/BioMedLM",
+                "microsoft/BioGPT-Large"
+            ]
         )
+        
+        context_options = st.multiselect(
+            "Context:",
+            options=[
+                "Original query context",
+                "Pathway sources used",
+                "Mechanism description",
+                "All of the above"
+            ],
+            default=["All of the above"]
+        )
+        
+        if st.button("🧬 Run Verification", type="primary", use_container_width=True):
+            
+            signatures_to_verify = (
+                st.session_state.dam_expanded_signatures 
+                if st.session_state.dam_expanded_signatures 
+                else st.session_state.semantic_signatures
+            )
+            
+            if not signatures_to_verify:
+                st.error("No signatures")
+                return
+            
+            mode = "verify_only" if "Only" in verification_mode else "verify_expand"
+            
+            suggestions = {}
+            progress_bar = st.progress(0)
+            status = st.empty()
+            
+            for i, sig in enumerate(signatures_to_verify):
+                status.info(f"Verifying: {sig.signature_name}...")
+                
+                result = verify_signature_with_llm2(
+                    sig,
+                    query,
+                    mode,
+                    llm2_model,
+                    st.session_state.hf_token,
+                    context_options
+                )
+                
+                suggestions[sig.signature_id] = result
+                progress_bar.progress((i + 1) / len(signatures_to_verify))
+            
+            st.session_state.llm2_suggestions = suggestions
+            st.success(f"✅ Verified {len(signatures_to_verify)} signatures!")
+            
+            time.sleep(1)
+            st.rerun()
+    
+    else:
+        st.info("Verification disabled")
+        st.session_state.llm2_suggestions = {}
+
+
+def render_layer5_approval():
+    """Layer 5: Approval interface"""
+    
+    st.markdown("---")
+    st.markdown("### 👤 Layer 5: Review & Approve")
+    
+    signatures_to_approve = (
+        st.session_state.dam_expanded_signatures 
+        if st.session_state.dam_expanded_signatures 
+        else st.session_state.semantic_signatures
+    )
+    
+    if not signatures_to_approve:
+        return
+    
+    st.markdown(f"""
+    <div class="warning-box">
+    <strong>Review {len(signatures_to_approve)} signatures</strong><br>
+    Select genes to keep for each signature.
+    </div>
+    """, unsafe_allow_html=True)
+    
+    llm2_suggestions = st.session_state.llm2_suggestions
+    
+    for i, sig in enumerate(signatures_to_approve):
+        with st.expander(
+            f"📋 {sig.signature_name} ({len(sig.genes)} genes)",
+            expanded=(i == 0)
+        ):
+            
+            st.caption(f"**Facet:** {sig.facet}")
+            st.caption(f"**Mechanism:** {sig.mechanism}")
+            st.caption(f"**Confidence:** {sig.confidence:.3f}")
+            
+            if sig.dam_expanded:
+                st.caption("🔬 DAM Expanded")
+            
+            sig_suggestions = llm2_suggestions.get(sig.signature_id, {})
+            
+            if sig_suggestions.get('genes_to_remove'):
+                st.warning(f"⚠️ LLM suggests removing: {', '.join(sig_suggestions['genes_to_remove'])}")
+            
+            if sig_suggestions.get('genes_to_add'):
+                st.info(f"➕ LLM suggests adding: {', '.join(sig_suggestions['genes_to_add'])}")
+            
+            st.markdown("**Gene Selection:**")
+            
+            select_all_key = f"select_all_{sig.signature_id}"
+            select_all = st.checkbox("Select All", key=select_all_key, value=True)
+            
+            selected_genes = []
+            
+            for gene in sig.genes:
+                is_flagged = gene in sig_suggestions.get('genes_to_remove', [])
+                
+                col1, col2, col3 = st.columns([1, 5, 2])
+                
+                with col1:
+                    gene_key = f"gene_{sig.signature_id}_{gene}"
+                    is_selected = st.checkbox(
+                        "",
+                        key=gene_key,
+                        value=select_all and not is_flagged,
+                        label_visibility="collapsed"
+                    )
+                
+                with col2:
+                    label = f"**{gene}**"
+                    if is_flagged:
+                        label += " ⚠️"
+                    st.markdown(label)
+                
+                with col3:
+                    if is_flagged:
+                        reasoning = sig_suggestions.get('reasoning', {}).get(gene, "")
+                        if reasoning and st.button("Why?", key=f"why_{sig.signature_id}_{gene}"):
+                            st.caption(reasoning)
+                
+                if is_selected:
+                    selected_genes.append(gene)
+            
+            if sig_suggestions.get('genes_to_add'):
+                st.markdown("**Suggested Additions:**")
+                
+                for gene in sig_suggestions['genes_to_add']:
+                    col1, col2, col3 = st.columns([1, 5, 2])
+                    
+                    with col1:
+                        add_key = f"add_{sig.signature_id}_{gene}"
+                        should_add = st.checkbox("", key=add_key, value=False)
+                    
+                    with col2:
+                        st.markdown(f"**{gene}** ➕")
+                    
+                    with col3:
+                        reasoning = sig_suggestions.get('reasoning', {}).get(gene, "")
+                        if reasoning and st.button("Why?", key=f"why_add_{sig.signature_id}_{gene}"):
+                            st.caption(reasoning)
+                    
+                    if should_add:
+                        selected_genes.append(gene)
+            
+            st.markdown("---")
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if st.button("✅ Approve", key=f"approve_{sig.signature_id}", use_container_width=True):
+                    
+                    approved_sig = GeneSignature(
+                        signature_id=sig.signature_id,
+                        signature_name=sig.signature_name,
+                        genes=selected_genes,
+                        facet=sig.facet,
+                        mechanism=sig.mechanism,
+                        confidence=sig.confidence,
+                        gene_scores=sig.gene_scores,
+                        source_pathways=sig.source_pathways,
+                        dam_expanded=sig.dam_expanded,
+                        llm2_verified=bool(sig_suggestions)
+                    )
+                    
+                    existing_ids = [s.signature_id for s in st.session_state.final_approved_signatures]
+                    if sig.signature_id in existing_ids:
+                        idx = existing_ids.index(sig.signature_id)
+                        st.session_state.final_approved_signatures[idx] = approved_sig
+                    else:
+                        st.session_state.final_approved_signatures.append(approved_sig)
+                    
+                    st.success(f"✅ Approved with {len(selected_genes)} genes")
+            
+            with col2:
+                if st.button("❌ Reject", key=f"reject_{sig.signature_id}", use_container_width=True):
+                    st.warning("Signature rejected")
+    
+    if st.session_state.final_approved_signatures:
+        st.markdown("---")
+        st.markdown("### 💾 Export Approved Signatures")
+        
+        st.success(f"✅ {len(st.session_state.final_approved_signatures)} signatures approved")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            gmt_lines = []
+            for sig in st.session_state.final_approved_signatures:
+                sig_id = sig.signature_id
+                desc = f"{sig.facet}|{sig.mechanism}|{len(sig.genes)}genes|conf:{sig.confidence:.3f}"
+                if sig.dam_expanded:
+                    desc += "|DAM"
+                if sig.llm2_verified:
+                    desc += "|LLM2"
+                genes = '\t'.join(sig.genes)
+                gmt_lines.append(f"{sig_id}\t{desc}\t{genes}")
+            
+            gmt_content = '\n'.join(gmt_lines)
+            
+            st.download_button(
+                "📥 Download GMT",
+                data=gmt_content,
+                file_name=f"signatures_{datetime.now().strftime('%Y%m%d_%H%M%S')}.gmt",
+                mime="text/plain",
+                use_container_width=True
+            )
+        
+        with col2:
+            results = {
+                'query': st.session_state.get('main_query', ''),
+                'decomposition': st.session_state.decomposition_result.facets if st.session_state.decomposition_result else [],
+                'signatures': [sig.to_dict() for sig in st.session_state.final_approved_signatures],
+                'total_signatures': len(st.session_state.final_approved_signatures),
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            st.download_button(
+                "📥 Download JSON",
+                data=json.dumps(results, indent=2),
+                file_name=f"signatures_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                mime="application/json",
+                use_container_width=True
+            )
 
 
 # ============================================================
@@ -1024,9 +1323,9 @@ def main():
     
     st.markdown("""
     <div style='text-align: center; padding: 32px 0 16px 0;'>
-        <h1>🧬 Biological Signature Generator</h1>
+        <h1>🧬 Multi-Layer Signature Generator</h1>
         <p style='font-size: 1.1rem; color: #94a3b8;'>
-            Mechanism-specific gene signatures (10-20 genes each)
+            LLM Granularity → Semantic Selection → DAM Expansion → LLM Verification → Approval
         </p>
     </div>
     """, unsafe_allow_html=True)
@@ -1035,16 +1334,13 @@ def main():
     
     render_sidebar()
     
-    tab1, tab2, tab3 = st.tabs(["📚 Knowledge Base", "🧬 Generate", "📊 Results"])
+    tab1, tab2 = st.tabs(["📚 Knowledge Base", "🧬 Generate Signatures"])
     
     with tab1:
         render_kb_tab()
     
     with tab2:
         render_generation_tab()
-    
-    with tab3:
-        render_results_tab()
 
 
 if __name__ == "__main__":
