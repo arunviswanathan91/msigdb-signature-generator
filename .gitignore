@@ -36,11 +36,7 @@ ENV/
 # Streamlit
 .streamlit/secrets.toml
 
-# Data Files (LARGE - Don't commit to GitHub)
-data/knowledge_base.json.gz
-data/embeddings/*.pkl
-data/faiss_index.bin
-data/faiss_index.bin.ids
+
 
 # Results & Outputs (Generated files)
 results/
