@@ -178,7 +178,11 @@ class SignatureBuilder:
             facet=facet_name,
             genes=sorted(extended_genes),
             gene_count=len(extended_genes),
-            derivation_method='semantic',
+            derivation_method=(     
+                "hybrid_expansion"     
+                if self.mode in ["hybrid", "neighbor"]     
+                else "semantic" 
+            ),
             source_pathways=all_pathway_ids[:5],
             confidence=float(avg_frequency)
         )
@@ -231,14 +235,27 @@ class SignatureBuilder:
         Returns list of signatures (core, extended, unique as applicable)
         """
         signatures = []
-        
+        # Adjust thresholds based on expansion mode
+        if self.mode in ["hybrid", "neighbor"]:
+            core_freq = 0.5
+            extended_freq = 0.25
+        else:
+            core_freq = 0.6
+            extended_freq = 0.3
+
+
+                                       
         # Core signature
-        core_sig = self.build_core_signature(facet_name, pathways, min_frequency=0.6)
+        core_sig = self.build_core_signature(facet_name, pathways, min_frequency=core_freq)
         if core_sig:
             signatures.append(core_sig)
         
         # Extended signature
-        extended_sig = self.build_extended_signature(facet_name, pathways, min_frequency=0.3)
+        extended_sig = self.build_extended_signature(     
+            facet_name,     
+            pathways,     
+            min_frequency=extended_freq 
+        )
         if extended_sig:
             signatures.append(extended_sig)
         
@@ -319,6 +336,47 @@ def semantic_retrieval(query: str,
     
     similarities.sort(key=lambda x: x['similarity'], reverse=True)
     return similarities[:top_k]
+                           
+# ============================================================
+# NEIGHBOR EXPANSION (PLACEHOLDER FOR DAM)
+# ============================================================
+
+def neighbor_expand_pathways(
+    seed_pathways: List[Dict[str, Any]],
+    all_pathways: Dict[str, List[str]],
+    expansion_level: str = "balanced"
+) -> List[Dict[str, Any]]:
+    """
+    Expand seed pathways into neighboring biology.
+    This is a placeholder for DAM-based expansion.
+    """
+
+    level_threshold = {
+        "core": 3,
+        "balanced": 2,
+        "broad": 1
+    }.get(expansion_level, 2)
+
+    expanded = list(seed_pathways)
+    seed_ids = {p["pathway_id"] for p in seed_pathways}
+
+    seed_genes = set()
+    for p in seed_pathways:
+        seed_genes.update(p["genes"])
+
+    for pid, genes in all_pathways.items():
+        if pid in seed_ids:
+            continue
+
+        overlap = len(seed_genes.intersection(genes))
+        if overlap >= level_threshold:
+            expanded.append({
+                "pathway_id": pid,
+                "genes": genes,
+                "similarity": 0.0
+            })
+
+    return expanded
 
 
 # ============================================================
@@ -456,7 +514,7 @@ def initialize_session_state():
         'kb_uploaded': False,
         'results': None,
         'execution_complete': False,
-        'generation_mode': 'semantic',  # 'semantic' or 'neighbor_expansion'
+        'generation_mode': 'semantic',  # 'semantic', 'hybrid', or 'neighbor'
         'expansion_level': 'core'  # 'core', 'balanced', 'broad'
     }
     
@@ -627,32 +685,40 @@ def render_generation_tab():
     )
     
     # Generation mode
-    st.markdown("### Signature Building Mode")
+    st.markdown("### Signature Building Strategy")
     
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        semantic_selected = st.button(
-            "📊 Semantic Mode",
-            use_container_width=True,
-            type="primary" if st.session_state.generation_mode == 'semantic' else "secondary"
+    generation_mode = st.radio(
+        "How should signatures be built?",
+        options=[
+            "Semantic only (precise, focused)",
+            "Semantic + neighbor expansion (recommended)",
+            "Neighbor expansion only (exploratory)"
+        ],
+        index=1,
+        help=(
+            "Semantic search finds biology related to your question. "
+            "Neighbor expansion uses a mathematical model to include related biology. "
+            "The recommended option combines both."
         )
-        st.caption("Build signatures from pathway gene extraction only")
-        if semantic_selected:
-            st.session_state.generation_mode = 'semantic'
+    )
     
-    with col2:
-        neighbor_selected = st.button(
-            "🔬 Neighbor Expansion",
-            use_container_width=True,
-            type="primary" if st.session_state.generation_mode == 'neighbor_expansion' else "secondary"
-        )
-        st.caption("Include related genes using mathematical scoring")
-        if neighbor_selected:
-            st.session_state.generation_mode = 'neighbor_expansion'
+    # Normalize internal state
+    if generation_mode.startswith("Semantic only"):
+        st.session_state.generation_mode = "semantic"
+    elif generation_mode.startswith("Semantic +"):
+        st.session_state.generation_mode = "hybrid"
+    else:
+        st.session_state.generation_mode = "neighbor"
     
-    st.info(f"**Selected:** {st.session_state.generation_mode.replace('_', ' ').title()}")
-    
+    st.markdown("""
+    <div class="info-box">
+    <strong>What this means:</strong><br><br>
+    • <b>Semantic only</b>: build signatures from directly relevant pathways<br>
+    • <b>Semantic + neighbor</b>: expand into related biology before building signatures<br>
+    • <b>Neighbor only</b>: explore broader biological neighborhoods<br><br>
+    Pathways are used as evidence — the final output is gene signatures.
+    </div>
+    """, unsafe_allow_html=True)
     # Advanced settings
     with st.expander("⚙️ Advanced Settings", expanded=False):
         st.warning("Default values work well for most cases")
@@ -662,7 +728,17 @@ def render_generation_tab():
             min_genes = st.number_input("Min genes per signature", 3, 20, 5)
         with col2:
             max_genes = st.number_input("Max genes per signature", 20, 200, 100)
-    
+        st.selectbox(
+            "Biological expansion depth",
+            options=["core", "balanced", "broad"],
+            index=1,
+            help=(
+                "Controls how far signatures expand into related biology. "
+                "Does not affect ranking, only breadth."
+            ),
+            key="expansion_level"
+        )
+
     # Generate button
     st.markdown("<br>", unsafe_allow_html=True)
     
@@ -731,13 +807,36 @@ def generate_signatures(query: str, target_count: int):
                 status.info(f"   Building signatures for: {facet_name}")
                 
                 # Retrieve relevant pathways
-                relevant_pathways = semantic_retrieval(
-                    facet_query,
-                    pathways,
-                    embedding_model,
-                    pathway_embeddings,
-                    top_k=30
-                )
+                # ------------------------------------------------------------
+                # STEP 1: Semantic seed (if enabled)
+                # ------------------------------------------------------------
+                if st.session_state.generation_mode in ["semantic", "hybrid"]:
+                    seed_pathways = semantic_retrieval(
+                        facet_query,
+                        pathways,
+                        embedding_model,
+                        pathway_embeddings,
+                        top_k=30
+                    )
+                else:
+                    # Neighbor-only mode starts from all pathways
+                    seed_pathways = [
+                        {"pathway_id": pid, "genes": genes, "similarity": 0.0}
+                        for pid, genes in pathways.items()
+                    ]
+                
+                # ------------------------------------------------------------
+                # STEP 2: Neighbor expansion (if enabled)
+                # ------------------------------------------------------------
+                if st.session_state.generation_mode in ["hybrid", "neighbor"]:
+                    relevant_pathways = neighbor_expand_pathways(
+                        seed_pathways,
+                        pathways,
+                        expansion_level=st.session_state.expansion_level
+                    )
+                else:
+                    relevant_pathways = seed_pathways
+
                 
                 # Get genes from other facets (for unique signatures)
                 other_facet_genes = set()
@@ -780,7 +879,11 @@ def generate_signatures(query: str, target_count: int):
                 'facets': facets,
                 'signatures': [sig.to_dict() for sig in all_signatures],
                 'total_signatures': len(all_signatures),
-                'generation_mode': st.session_state.generation_mode,
+                'generation_mode': (     
+                    "neighbor_only_unranked"     
+                    if st.session_state.generation_mode == "neighbor"     
+                    else st.session_state.generation_mode 
+                ),
                 'timestamp': datetime.now().isoformat()
             }
             
