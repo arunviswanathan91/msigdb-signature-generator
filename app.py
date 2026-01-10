@@ -80,6 +80,7 @@ class SignatureBuilder:
         if not pathways_dict:
             return []
         
+<<<<<<< HEAD
         signatures = []
         
         # Collect all genes with frequencies
@@ -88,6 +89,164 @@ class SignatureBuilder:
             gene_freq.update(genes)
         
         total_pathways = len(pathways_dict)
+=======
+        # Count gene frequencies
+        gene_counts = Counter()
+        all_pathway_ids = []
+        
+        for pathway in pathways:
+            genes = pathway.get('genes', [])
+            all_pathway_ids.append(pathway.get('pathway_id', 'Unknown'))
+            gene_counts.update(genes)
+        
+        # Extract core genes
+        n_pathways = len(pathways)
+        threshold = int(n_pathways * min_frequency)
+        
+        core_genes = [
+            gene for gene, count in gene_counts.items()
+            if count >= threshold
+        ]
+        
+        if len(core_genes) < 3:
+            return None
+        
+        # Calculate confidence based on consistency
+        avg_frequency = np.mean([gene_counts[g] / n_pathways for g in core_genes])
+        
+        signature_id = f"{facet_name.upper().replace(' ', '_')}_CORE"
+        
+        return GeneSignature(
+            signature_id=signature_id,
+            signature_name=f"{facet_name} (Core)",
+            facet=facet_name,
+            genes=sorted(core_genes),
+            gene_count=len(core_genes),
+            derivation_method='core_extraction',
+            source_pathways=all_pathway_ids[:5],  # Top 5 for brevity
+            confidence=float(avg_frequency)
+        )
+    
+    def build_extended_signature(self,
+                                 facet_name: str,
+                                 pathways: List[Dict[str, Any]],
+                                 min_frequency: float = 0.3) -> Optional[GeneSignature]:
+        """
+        Build an EXTENDED signature - includes less frequent but relevant genes.
+        """
+        if not pathways:
+            return None
+        
+        gene_counts = Counter()
+        all_pathway_ids = []
+        
+        for pathway in pathways:
+            genes = pathway.get('genes', [])
+            all_pathway_ids.append(pathway.get('pathway_id', 'Unknown'))
+            gene_counts.update(genes)
+        
+        n_pathways = len(pathways)
+        threshold = int(n_pathways * min_frequency)
+        
+        extended_genes = [
+            gene for gene, count in gene_counts.items()
+            if count >= threshold
+        ]
+        
+        if len(extended_genes) < 5:
+            return None
+        
+        avg_frequency = np.mean([gene_counts[g] / n_pathways for g in extended_genes])
+        
+        signature_id = f"{facet_name.upper().replace(' ', '_')}_EXTENDED"
+        
+        return GeneSignature(
+            signature_id=signature_id,
+            signature_name=f"{facet_name} (Extended)",
+            facet=facet_name,
+            genes=sorted(extended_genes),
+            gene_count=len(extended_genes),
+            derivation_method=(     
+                "hybrid_expansion"     
+                if self.mode in ["hybrid", "neighbor"]     
+                else "semantic" 
+            ),
+            source_pathways=all_pathway_ids[:5],
+            confidence=float(avg_frequency)
+        )
+    
+    def build_unique_signature(self,
+                              facet_name: str,
+                              pathways: List[Dict[str, Any]],
+                              all_genes_in_other_facets: Set[str]) -> Optional[GeneSignature]:
+        """
+        Build a UNIQUE signature - genes specific to this facet.
+        """
+        if not pathways:
+            return None
+        
+        # Get all genes in this facet
+        facet_genes = set()
+        all_pathway_ids = []
+        
+        for pathway in pathways:
+            genes = pathway.get('genes', [])
+            all_pathway_ids.append(pathway.get('pathway_id', 'Unknown'))
+            facet_genes.update(genes)
+        
+        # Find genes unique to this facet
+        unique_genes = facet_genes - all_genes_in_other_facets
+        
+        if len(unique_genes) < 3:
+            return None
+        
+        signature_id = f"{facet_name.upper().replace(' ', '_')}_UNIQUE"
+        
+        return GeneSignature(
+            signature_id=signature_id,
+            signature_name=f"{facet_name} (Unique)",
+            facet=facet_name,
+            genes=sorted(list(unique_genes)),
+            gene_count=len(unique_genes),
+            derivation_method='unique_extraction',
+            source_pathways=all_pathway_ids[:5],
+            confidence=0.75
+        )
+    
+    def build_signatures_for_facet(self,
+                                   facet_name: str,
+                                   pathways: List[Dict[str, Any]],
+                                   all_genes_in_other_facets: Set[str]) -> List[GeneSignature]:
+        """
+        Build ALL signature types for a single facet.
+        
+        Returns list of signatures (core, extended, unique as applicable)
+        """
+        signatures = []
+        # Adjust thresholds based on expansion mode
+        if self.mode in ["hybrid", "neighbor"]:
+            core_freq = 0.5
+            extended_freq = 0.25
+        else:
+            core_freq = 0.6
+            extended_freq = 0.3
+
+
+                                       
+        # Core signature
+        core_sig = self.build_core_signature(facet_name, pathways, min_frequency=core_freq)
+        if core_sig:
+            signatures.append(core_sig)
+        
+        # Extended signature
+        extended_sig = self.build_extended_signature(     
+            facet_name,     
+            pathways,     
+            min_frequency=extended_freq 
+        )
+        if extended_sig:
+            signatures.append(extended_sig)
+>>>>>>> 629ba36d2ebb51a7d671729affe9c83b6e31c6dd
         
         # Strategy 1: High-frequency signature (genes in 60%+ pathways)
         high_freq_genes = [
@@ -209,6 +368,7 @@ def semantic_search_pathways(
         
         return matches
     
+<<<<<<< HEAD
     # Compute embeddings
     query_emb = model.encode(query, convert_to_numpy=True)
     
@@ -234,6 +394,51 @@ def semantic_search_pathways(
         top_pathways[pid] = pathways_dict[pid]
     
     return top_pathways
+=======
+    similarities.sort(key=lambda x: x['similarity'], reverse=True)
+    return similarities[:top_k]
+                           
+# ============================================================
+# NEIGHBOR EXPANSION (PLACEHOLDER FOR DAM)
+# ============================================================
+
+def neighbor_expand_pathways(
+    seed_pathways: List[Dict[str, Any]],
+    all_pathways: Dict[str, List[str]],
+    expansion_level: str = "balanced"
+) -> List[Dict[str, Any]]:
+    """
+    Expand seed pathways into neighboring biology.
+    This is a placeholder for DAM-based expansion.
+    """
+
+    level_threshold = {
+        "core": 3,
+        "balanced": 2,
+        "broad": 1
+    }.get(expansion_level, 2)
+
+    expanded = list(seed_pathways)
+    seed_ids = {p["pathway_id"] for p in seed_pathways}
+
+    seed_genes = set()
+    for p in seed_pathways:
+        seed_genes.update(p["genes"])
+
+    for pid, genes in all_pathways.items():
+        if pid in seed_ids:
+            continue
+
+        overlap = len(seed_genes.intersection(genes))
+        if overlap >= level_threshold:
+            expanded.append({
+                "pathway_id": pid,
+                "genes": genes,
+                "similarity": 0.0
+            })
+
+    return expanded
+>>>>>>> 629ba36d2ebb51a7d671729affe9c83b6e31c6dd
 
 
 # ============================================================
@@ -355,6 +560,11 @@ def initialize_session_state():
         'kb_loaded': False,
         'results': None,
         'execution_complete': False,
+<<<<<<< HEAD
+=======
+        'generation_mode': 'semantic',  # 'semantic', 'hybrid', or 'neighbor'
+        'expansion_level': 'core'  # 'core', 'balanced', 'broad'
+>>>>>>> 629ba36d2ebb51a7d671729affe9c83b6e31c6dd
     }
     
     for key, value in defaults.items():
@@ -552,6 +762,7 @@ def render_generation_tab():
         placeholder="Example: T cell exhaustion in cancer\nExample: Macrophage polarization\nExample: Metabolic reprogramming",
     )
     
+<<<<<<< HEAD
     # Controls
     col1, col2, col3 = st.columns(3)
     
@@ -585,6 +796,73 @@ def render_generation_tab():
     
     st.info(f"Will generate **{target_count} signatures**, each with **{min_genes}-{max_genes} genes**")
     
+=======
+    # Target count
+    target_count = st.slider(
+        "How many gene signatures do you want?",
+        min_value=5,
+        max_value=100,
+        value=25,
+        step=5,
+        help="Total number of custom gene signatures to generate"
+    )
+    
+    # Generation mode
+    st.markdown("### Signature Building Strategy")
+    
+    generation_mode = st.radio(
+        "How should signatures be built?",
+        options=[
+            "Semantic only (precise, focused)",
+            "Semantic + neighbor expansion (recommended)",
+            "Neighbor expansion only (exploratory)"
+        ],
+        index=1,
+        help=(
+            "Semantic search finds biology related to your question. "
+            "Neighbor expansion uses a mathematical model to include related biology. "
+            "The recommended option combines both."
+        )
+    )
+    
+    # Normalize internal state
+    if generation_mode.startswith("Semantic only"):
+        st.session_state.generation_mode = "semantic"
+    elif generation_mode.startswith("Semantic +"):
+        st.session_state.generation_mode = "hybrid"
+    else:
+        st.session_state.generation_mode = "neighbor"
+    
+    st.markdown("""
+    <div class="info-box">
+    <strong>What this means:</strong><br><br>
+    • <b>Semantic only</b>: build signatures from directly relevant pathways<br>
+    • <b>Semantic + neighbor</b>: expand into related biology before building signatures<br>
+    • <b>Neighbor only</b>: explore broader biological neighborhoods<br><br>
+    Pathways are used as evidence — the final output is gene signatures.
+    </div>
+    """, unsafe_allow_html=True)
+    # Advanced settings
+    with st.expander("⚙️ Advanced Settings", expanded=False):
+        st.warning("Default values work well for most cases")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            min_genes = st.number_input("Min genes per signature", 3, 20, 5)
+        with col2:
+            max_genes = st.number_input("Max genes per signature", 20, 200, 100)
+        st.selectbox(
+            "Biological expansion depth",
+            options=["core", "balanced", "broad"],
+            index=1,
+            help=(
+                "Controls how far signatures expand into related biology. "
+                "Does not affect ranking, only breadth."
+            ),
+            key="expansion_level"
+        )
+
+>>>>>>> 629ba36d2ebb51a7d671729affe9c83b6e31c6dd
     # Generate button
     if st.button("🚀 Generate Signatures", type="primary", use_container_width=True):
         if not query:
@@ -594,6 +872,166 @@ def render_generation_tab():
         generate_signatures(query, target_count, min_genes, max_genes)
 
 
+<<<<<<< HEAD
+=======
+def generate_signatures(query: str, target_count: int):
+    """Main signature generation pipeline"""
+    
+    progress_container = st.container()
+    
+    with progress_container:
+        progress_bar = st.progress(0)
+        status = st.empty()
+        
+        try:
+            # Load KB
+            status.info("📚 Loading knowledge base...")
+            progress_bar.progress(10)
+            
+            kb = KnowledgeBase(st.session_state.kb_path)
+            pathways, metadata = kb.load()
+            
+            # Decompose query
+            status.info("🧠 Decomposing query into biological facets...")
+            progress_bar.progress(20)
+            
+            if st.session_state.token_validated and st.session_state.hf_token:
+                facets = decompose_query_llm(query, target_count, st.session_state.hf_token)
+            else:
+                facets = decompose_query_simple(query, target_count)
+            
+            status.info(f"   Found {len(facets)} biological facets")
+            progress_bar.progress(30)
+            
+            # Load embedding model
+            status.info("🔍 Loading semantic search model...")
+            embedding_model = load_embedding_model()
+            if not embedding_model:
+                st.error("Cannot proceed without embedding model")
+                return
+            
+            # Compute pathway embeddings
+            kb_hash = hash(str(sorted(pathways.keys())))
+            pathway_embeddings = compute_pathway_embeddings_cached(
+                embedding_model, pathways, str(kb_hash)
+            )
+            progress_bar.progress(40)
+            
+            # Build signatures for each facet
+            status.info("🧬 Building gene signatures...")
+            
+            builder = SignatureBuilder(mode=st.session_state.generation_mode)
+            all_signatures = []
+            facet_genes_map = {}  # Track genes per facet
+            
+            for i, facet in enumerate(facets):
+                facet_name = facet['facet_name']
+                facet_query = facet['query']
+                
+                status.info(f"   Building signatures for: {facet_name}")
+                
+                # Retrieve relevant pathways
+                # ------------------------------------------------------------
+                # STEP 1: Semantic seed (if enabled)
+                # ------------------------------------------------------------
+                if st.session_state.generation_mode in ["semantic", "hybrid"]:
+                    seed_pathways = semantic_retrieval(
+                        facet_query,
+                        pathways,
+                        embedding_model,
+                        pathway_embeddings,
+                        top_k=30
+                    )
+                else:
+                    # Neighbor-only mode starts from all pathways
+                    seed_pathways = [
+                        {"pathway_id": pid, "genes": genes, "similarity": 0.0}
+                        for pid, genes in pathways.items()
+                    ]
+                
+                # ------------------------------------------------------------
+                # STEP 2: Neighbor expansion (if enabled)
+                # ------------------------------------------------------------
+                if st.session_state.generation_mode in ["hybrid", "neighbor"]:
+                    relevant_pathways = neighbor_expand_pathways(
+                        seed_pathways,
+                        pathways,
+                        expansion_level=st.session_state.expansion_level
+                    )
+                else:
+                    relevant_pathways = seed_pathways
+
+                
+                # Get genes from other facets (for unique signatures)
+                other_facet_genes = set()
+                for other_facet_id, other_genes in facet_genes_map.items():
+                    if other_facet_id != facet['facet_id']:
+                        other_facet_genes.update(other_genes)
+                
+                # Build signatures
+                facet_signatures = builder.build_signatures_for_facet(
+                    facet_name,
+                    relevant_pathways,
+                    other_facet_genes
+                )
+                
+                # Track genes in this facet
+                facet_all_genes = set()
+                for sig in facet_signatures:
+                    facet_all_genes.update(sig.genes)
+                facet_genes_map[facet['facet_id']] = facet_all_genes
+                
+                all_signatures.extend(facet_signatures)
+                
+                progress_pct = 40 + int((i + 1) / len(facets) * 50)
+                progress_bar.progress(progress_pct)
+            
+            status.info(f"   Generated {len(all_signatures)} signatures")
+            progress_bar.progress(90)
+            
+            # Enforce target count
+            if len(all_signatures) > target_count:
+                # Rank by confidence and diversity
+                all_signatures.sort(key=lambda s: s.confidence, reverse=True)
+                all_signatures = all_signatures[:target_count]
+                status.info(f"   Trimmed to {target_count} signatures")
+            
+            # Store results
+            st.session_state.results = {
+                'query': query,
+                'target_count': target_count,
+                'facets': facets,
+                'signatures': [sig.to_dict() for sig in all_signatures],
+                'total_signatures': len(all_signatures),
+                'generation_mode': (     
+                    "neighbor_only_unranked"     
+                    if st.session_state.generation_mode == "neighbor"     
+                    else st.session_state.generation_mode 
+                ),
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            progress_bar.progress(100)
+            status.success("✅ Signature generation complete!")
+            
+            st.session_state.execution_complete = True
+            st.balloons()
+            
+            time.sleep(1)
+            st.rerun()
+            
+        except Exception as e:
+            status.error(f"❌ Generation failed: {e}")
+            progress_bar.empty()
+            import traceback
+            st.code(traceback.format_exc())
+
+
+# ============================================================
+# RESULTS TAB
+# ============================================================
+
+>>>>>>> 629ba36d2ebb51a7d671729affe9c83b6e31c6dd
 def render_results_tab():
     if not st.session_state.execution_complete:
         st.info("ℹ️ No results yet. Generate signatures first.")
