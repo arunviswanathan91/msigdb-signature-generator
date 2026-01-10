@@ -1,5 +1,6 @@
 # MSigDB Signature Generator - Requirements
 # ==========================================
+# Updated for v3.0 with dual KB management
 
 # Core Streamlit
 streamlit>=1.28.0
@@ -21,3 +22,6 @@ scipy>=1.11.0
 # Utilities
 python-dateutil>=2.8.2
 packaging>=23.0
+
+# Additional dependencies for KB building
+tqdm>=4.65.0
