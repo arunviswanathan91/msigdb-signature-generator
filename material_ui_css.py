@@ -2,7 +2,7 @@
 Material UI Inspired CSS
 Replace inject_modern_css() function in your app with this
 """
-
+import streamlit as st
 def inject_material_ui_css():
     st.markdown("""
     <style>
