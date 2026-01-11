@@ -88,51 +88,34 @@ def inject_material_design_3():
         padding: 1.5rem 0 !important;
     }
     
-    /* Hide only the value tooltip, not the slider itself */
-    .stSlider [data-baseweb="slider"] [role="slider"]::before {
-        display: none !important;
-    }
-    
-    /* Slider track */
+    /* Slider track background */
     .stSlider [data-baseweb="slider"] {
-        background: transparent !important;
+        height: 4px !important;
     }
     
-    .stSlider [data-baseweb="slider"] > div {
-        background: transparent !important;
+    /* Slider active track */
+    .stSlider [data-baseweb="slider"] > div > div:first-child {
+        background: var(--md-sys-color-primary) !important;
+        height: 4px !important;
     }
     
-    .stSlider [data-baseweb="slider"] [data-testid="stTickBar"] {
+    /* Slider inactive track */  
+    .stSlider [data-baseweb="slider"] > div > div:last-child {
         background: var(--md-sys-color-outline-variant) !important;
         height: 4px !important;
-        border-radius: 2px !important;
-    }
-    
-    /* Slider filled track */
-    .stSlider [data-baseweb="slider"] [data-testid="stTickBar"] > div {
-        background: var(--md-sys-color-primary) !important;
     }
     
     /* Slider thumb */
-    .stSlider [data-baseweb="slider"] [role="slider"] {
-        background: var(--md-sys-color-primary) !important;
+    .stSlider [data-baseweb="slider"] div[role="slider"] {
+        background-color: var(--md-sys-color-primary) !important;
         width: 20px !important;
         height: 20px !important;
         border-radius: 50% !important;
-        border: none !important;
         box-shadow: 0 1px 3px rgba(0,0,0,0.4), 0 2px 8px rgba(0,0,0,0.2) !important;
-        transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
-        top: 50% !important;
-        transform: translateY(-50%) !important;
     }
     
-    .stSlider [data-baseweb="slider"] [role="slider"]:hover {
-        transform: translateY(-50%) scale(1.2) !important;
+    .stSlider [data-baseweb="slider"] div[role="slider"]:hover {
         box-shadow: 0 2px 8px rgba(0,0,0,0.4), 0 4px 16px rgba(0,0,0,0.2) !important;
-    }
-    
-    .stSlider [data-baseweb="slider"] [role="slider"]:active {
-        transform: translateY(-50%) scale(1.3) !important;
     }
     
     /* Labels */
