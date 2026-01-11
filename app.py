@@ -34,18 +34,14 @@ from collections import Counter, defaultdict
 import hashlib
 import pickle
 from db_client import DatabaseClient
-from material_design_3_components import (
-    inject_material_design_3,
-    material_button,
+from material_design_theme import (
+    inject_material_theme,
+    material_text_area,
     material_slider,
-    material_text_field,
-    material_select,
     material_checkbox,
-    material_multiselect,
-    material_card,
-    material_chip,
-    material_snackbar
+    material_button,
 )
+
 
 # ============================================================
 # DATA CLASSES
@@ -1458,7 +1454,7 @@ def main():
     )
     
     initialize_session_state()
-    inject_material_design_3()
+    inject_material_theme()
     
     st.markdown("""
     <div style='text-align: center; padding: 32px 0 16px 0;'>
