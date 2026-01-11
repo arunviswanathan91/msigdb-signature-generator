@@ -1,7 +1,8 @@
 import streamlit as st
 
 # ==============================================================================
-# 1. WRAPPER FUNCTIONS (Fixes ImportError)
+# 1. WRAPPER FUNCTIONS
+#    (These map your custom names to standard Streamlit widgets)
 # ==============================================================================
 
 def material_text_field(label, value="", type="default", help=None, key=None):
@@ -13,11 +14,11 @@ def material_text_area(label, value="", height=None, placeholder=None, key=None)
 def material_slider(label, min_value, max_value, value, step=None, help=None, key=None):
     return st.slider(label, min_value, max_value, value, step=step, help=help, key=key)
 
-def material_select(label, options, index=0, key=None, help=None):
-    return st.selectbox(label, options, index=index, key=key, help=help)
+def material_select(label, options, index=0, key=None, help=None, on_change=None):
+    return st.selectbox(label, options, index=index, key=key, help=help, on_change=on_change)
 
-def material_multiselect(label, options, default=None, key=None, help=None):
-    return st.multiselect(label, options, default=default, key=key, help=help)
+def material_multiselect(label, options, default=None, key=None, help=None, on_change=None):
+    return st.multiselect(label, options, default=default, key=key, help=help, on_change=on_change)
 
 def material_checkbox(label, value=False, key=None, help=None, label_visibility="visible"):
     return st.checkbox(label, value=value, key=key, help=help, label_visibility=label_visibility)
@@ -29,7 +30,8 @@ def material_download_button(label, data, file_name=None, mime=None, key=None, u
     return st.download_button(label, data, file_name=file_name, mime=mime, key=key, use_container_width=use_container_width)
 
 # ==============================================================================
-# 2. CSS INJECTION (Fixes UI Glitches)
+# 2. CSS INJECTION
+#    (Fixes the UI and height issues)
 # ==============================================================================
 
 def inject_material_theme():
@@ -64,6 +66,7 @@ def inject_material_theme():
         font-family: 'Roboto', sans-serif;
     }
 
+    /* Reduce top padding */
     .block-container {
         padding-top: 2rem;
         max-width: 100%;
@@ -80,9 +83,9 @@ def inject_material_theme():
     }
 
     /* =========================================================
-       INPUTS (TEXT / AREA / SELECT)
+       INPUTS & SELECTS (Fixed Height)
        ========================================================= */
-    /* Applied to text inputs and select boxes, but NOT textareas to preserve height control */
+    /* Target inputs and selects, but exclude textareas so they can resize */
     input, select {
         background-color: var(--md-surface-high) !important;
         color: var(--md-text) !important;
@@ -92,8 +95,11 @@ def inject_material_theme():
         line-height: 1.5 !important;
         box-sizing: border-box !important;
     }
-    
-    /* Text Areas need special handling to allow resizing and custom height */
+
+    /* =========================================================
+       TEXT AREA (Variable Height)
+       ========================================================= */
+    /* We do NOT set height: auto !important here, so Streamlit's 'height' param works */
     textarea {
         background-color: var(--md-surface-high) !important;
         color: var(--md-text) !important;
@@ -111,7 +117,7 @@ def inject_material_theme():
     }
 
     /* =========================================================
-       BUTTONS (MATERIAL FILLED)
+       BUTTONS (Material Style)
        ========================================================= */
     .stButton > button {
         background-color: var(--md-primary);
@@ -133,7 +139,7 @@ def inject_material_theme():
         transform: translateY(0);
     }
 
-    /* Secondary buttons (outlined style if needed, or just less prominent) */
+    /* Secondary / Outlined Buttons */
     button[kind="secondary"] {
         background-color: transparent !important;
         border: 1px solid var(--md-border) !important;
@@ -149,9 +155,9 @@ def inject_material_theme():
     }
 
     /* =========================================================
-       CONTAINER FIXES
+       FIXES FOR UI CONTAINERS
        ========================================================= */
-    /* Removing height: auto !important from stTextArea to allow python height param to work */
+    /* These prevent elements from collapsing unexpectedly */
     .element-container,
     .stMarkdown,
     .stExpander,
