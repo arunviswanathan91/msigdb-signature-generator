@@ -88,34 +88,29 @@ def inject_material_design_3():
         padding: 1.5rem 0 !important;
     }
     
-    /* Slider track background */
-    .stSlider [data-baseweb="slider"] {
-        height: 4px !important;
-    }
-    
-    /* Slider active track */
-    .stSlider [data-baseweb="slider"] > div > div:first-child {
+    .stSlider > div > div > div {
         background: var(--md-sys-color-primary) !important;
         height: 4px !important;
+        border-radius: 2px !important;
     }
     
-    /* Slider inactive track */  
-    .stSlider [data-baseweb="slider"] > div > div:last-child {
-        background: var(--md-sys-color-outline-variant) !important;
-        height: 4px !important;
-    }
-    
-    /* Slider thumb */
-    .stSlider [data-baseweb="slider"] div[role="slider"] {
-        background-color: var(--md-sys-color-primary) !important;
+    .stSlider > div > div > div > div {
+        background: var(--md-sys-color-on-primary) !important;
         width: 20px !important;
         height: 20px !important;
         border-radius: 50% !important;
+        border: none !important;
         box-shadow: 0 1px 3px rgba(0,0,0,0.4), 0 2px 8px rgba(0,0,0,0.2) !important;
+        transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
     }
     
-    .stSlider [data-baseweb="slider"] div[role="slider"]:hover {
+    .stSlider > div > div > div > div:hover {
+        transform: scale(1.2) !important;
         box-shadow: 0 2px 8px rgba(0,0,0,0.4), 0 4px 16px rgba(0,0,0,0.2) !important;
+    }
+    
+    .stSlider > div > div > div > div:active {
+        transform: scale(1.3) !important;
     }
     
     /* Labels */
@@ -128,41 +123,27 @@ def inject_material_design_3():
     }
     
     /* Buttons - M3 Filled Button */
-    .stButton > button,
-    .stButton button,
-    button[kind="primary"],
-    button[kind="secondary"] {
+    .stButton button {
         background: var(--md-sys-color-primary) !important;
-        color: #000000 !important;  /* Pure black for maximum contrast */
+        color: var(--md-sys-color-on-primary) !important;
         border: none !important;
         border-radius: var(--md-sys-shape-corner-large) !important;
         padding: 10px 24px !important;
         font-size: 14px !important;
-        font-weight: 600 !important;  /* Increased weight for better visibility */
+        font-weight: 500 !important;
         letter-spacing: 0.1px !important;
         text-transform: none !important;
         box-shadow: var(--md-sys-elevation-1) !important;
         transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
     }
     
-    .stButton > button:hover,
     .stButton button:hover {
         box-shadow: var(--md-sys-elevation-2) !important;
         background: color-mix(in srgb, var(--md-sys-color-primary) 90%, white) !important;
-        color: #000000 !important;
     }
     
-    .stButton > button:active,
     .stButton button:active {
         box-shadow: var(--md-sys-elevation-1) !important;
-        color: #000000 !important;
-    }
-    
-    /* Force text color in button children */
-    .stButton button p,
-    .stButton button span,
-    .stButton button div {
-        color: #000000 !important;
     }
     
     /* Text Input - M3 Filled Text Field */
@@ -337,7 +318,7 @@ def inject_material_design_3():
     """, unsafe_allow_html=True)
 
 
-def material_slider(label, min_value=0, max_value=100, value=50, step=1, key=None, help=None, disabled=False, format=None):
+def material_slider(label, min_value=0, max_value=100, value=50, key=None, help_text=None):
     """
     Material Design 3 Slider with custom styling
     Returns the slider value
@@ -348,31 +329,20 @@ def material_slider(label, min_value=0, max_value=100, value=50, step=1, key=Non
         min_value=min_value,
         max_value=max_value,
         value=value,
-        step=step,
         key=key,
-        help=help,
-        disabled=disabled,
-        format=format
+        help=help_text
     )
 
 
-def material_button(label, key=None, on_click=None, type="primary", use_container_width=False, disabled=False, help=None):
+def material_button(label, key=None, on_click=None, type="primary"):
     """
     Material Design 3 Button
     Returns True if clicked
     """
-    return st.button(
-        label, 
-        key=key, 
-        on_click=on_click, 
-        type=type,
-        use_container_width=use_container_width,
-        disabled=disabled,
-        help=help
-    )
+    return st.button(label, key=key, on_click=on_click)
 
 
-def material_text_field(label, value="", key=None, placeholder="", help=None, type="default", max_chars=None, disabled=False):
+def material_text_field(label, value="", key=None, placeholder="", help_text=None):
     """
     Material Design 3 Filled Text Field
     Returns the text value
@@ -382,58 +352,26 @@ def material_text_field(label, value="", key=None, placeholder="", help=None, ty
         value=value,
         key=key,
         placeholder=placeholder,
-        help=help,
-        type=type,
-        max_chars=max_chars,
-        disabled=disabled
+        help=help_text
     )
 
 
-def material_select(label, options, index=0, key=None, help=None, disabled=False, format_func=None):
+def material_select(label, options, index=0, key=None, help_text=None):
     """
     Material Design 3 Filled Dropdown
     Returns the selected value
     """
+    #  Ensure key is unique if not provided
+    if key is None:
+        import hashlib
+        key = "select_" + hashlib.md5(f"{label}{options}".encode()).hexdigest()[:8]
+    
     return st.selectbox(
         label=label,
         options=options,
         index=index,
         key=key,
-        help=help,
-        disabled=disabled,
-        format_func=format_func
-    )
-
-
-def material_checkbox(label, value=False, key=None, help=None, disabled=False, label_visibility="visible"):
-    """
-    Material Design 3 Checkbox
-    Returns the checkbox state
-    """
-    return st.checkbox(
-        label=label,
-        value=value,
-        key=key,
-        help=help,
-        disabled=disabled,
-        label_visibility=label_visibility
-    )
-
-
-def material_multiselect(label, options, default=None, key=None, help=None, disabled=False, format_func=None, max_selections=None):
-    """
-    Material Design 3 Multi-Select
-    Returns the selected values
-    """
-    return st.multiselect(
-        label=label,
-        options=options,
-        default=default,
-        key=key,
-        help=help,
-        disabled=disabled,
-        format_func=format_func,
-        max_selections=max_selections
+        help=help_text
     )
 
 
