@@ -132,11 +132,16 @@ def load_precomputed_dam_or_fail(path="data/dam_index_light.pkl"):
         st.error(f"❌ Failed to load DAM pickle: {e}")
         st.stop()
 
-    if "gene_to_pathways" not in package or "gene_cooccurrence" not in package:
-        st.error("❌ Invalid DAM file: missing required keys")
+    required_keys = {"gene_to_pathways", "pathways_dict"}
+    if not required_keys.issubset(package):
+        st.error(
+            f"❌ Invalid DAM file. Expected keys: {required_keys}, "
+            f"found: {set(package.keys())}"
+        )
         st.stop()
 
-    return package["gene_to_pathways"], package["gene_cooccurrence"]
+    return package["gene_to_pathways"], package["pathways_dict"]
+
 
 # ============================================================
 # SIGNATURE BUILDER - OPTIMIZED
@@ -148,13 +153,18 @@ class SignatureBuilder:
     def __init__(self, min_genes: int = 10, max_genes: int = 20):
         self.min_genes = min_genes
         self.max_genes = max_genes
-        self.dam_index = None
-        self.gene_cooccurrence = None
+        self.gene_to_pathways = None
+        self.pathways_dict = None
     
-    def set_dam_index(self, gene_to_pathways: Dict[str, Set[str]], gene_cooccurrence: Dict[Tuple[str, str], int]):
-        """Set precomputed DAM index"""
-        self.dam_index = gene_to_pathways
-        self.gene_cooccurrence = gene_cooccurrence
+    
+    def set_dam_index(
+        self,
+        gene_to_pathways: Dict[str, List[str]],
+        pathways_dict: Dict[str, List[str]]
+    ):
+        self.gene_to_pathways = gene_to_pathways
+        self.pathways_dict = pathways_dict
+
     
     def build_signature_from_pathways(
         self,
@@ -252,6 +262,7 @@ class SignatureBuilder:
         
         return signatures
     
+
     def expand_with_dam_fast(
         self,
         signature: GeneSignature,
@@ -259,60 +270,42 @@ class SignatureBuilder:
         max_additional: int = 5
     ) -> GeneSignature:
         """
-        OPTIMIZED: Expand signature using precomputed DAM index.
-        10-100x faster than scanning entire KB.
+        DAM expansion using gene→pathways→genes (ON-THE-FLY).
+        No gene-gene matrix. No heavy memory.
         """
-        
-        if not self.gene_cooccurrence:
-            return signature  # No index available
-        
-        # Find neighbors using precomputed index
-        neighbor_scores = defaultdict(float)
-        
-        for seed_gene in signature.genes:
-            # Look up all genes that co-occur with seed_gene
-            for other_gene in signature.genes:
-                if other_gene == seed_gene:
+    
+        if not self.gene_to_pathways or not self.pathways_dict:
+            return signature
+    
+        seed_genes = set(signature.genes)
+        candidate_scores = defaultdict(float)
+    
+        # 1. Collect all pathways touched by seed genes
+        seed_pathways = set()
+        for gene in seed_genes:
+            seed_pathways.update(self.gene_to_pathways.get(gene, []))
+    
+        # 2. Traverse those pathways and score new genes
+        for pathway_id in seed_pathways:
+            genes_in_pathway = self.pathways_dict.get(pathway_id, [])
+            for gene in genes_in_pathway:
+                if gene in seed_genes:
                     continue
-                
-                pair = tuple(sorted([seed_gene, other_gene]))
-                if pair in self.gene_cooccurrence:
-                    # Already in signature
-                    continue
-            
-            # Find new neighbors
-            if seed_gene in self.dam_index:
-                seed_pathways = self.dam_index[seed_gene]
-                
-                # Find genes in same pathways
-                for other_gene, other_pathways in self.dam_index.items():
-                    if other_gene in signature.genes:
-                        continue
-                    
-                    # Count co-occurrences
-                    pair = tuple(sorted([seed_gene, other_gene]))
-                    count = self.gene_cooccurrence.get(pair, 0)
-                    
-                    if count > 0:
-                        score = count * expansion_strength
-                        neighbor_scores[other_gene] = max(neighbor_scores[other_gene], score)
-        
-        # Select top neighbors
-        if neighbor_scores:
-            top_neighbors = sorted(neighbor_scores.items(), key=lambda x: x[1], reverse=True)
-            top_neighbors = top_neighbors[:max_additional]
-            
-            # Add to signature
-            new_genes = signature.genes + [g for g, _ in top_neighbors]
-            
-            # Enforce max_genes
-            if len(new_genes) > self.max_genes:
-                new_genes = new_genes[:self.max_genes]
-            
-            signature.genes = new_genes
-            signature.dam_expanded = True
-        
+                candidate_scores[gene] += expansion_strength
+    
+        if not candidate_scores:
+            return signature
+    
+        # 3. Select top neighbors
+        ranked = sorted(candidate_scores.items(), key=lambda x: x[1], reverse=True)
+        new_genes = [g for g, _ in ranked[:max_additional]]
+    
+        # 4. Merge + cap
+        signature.genes = (signature.genes + new_genes)[:self.max_genes]
+        signature.dam_expanded = True
+    
         return signature
+
     
     def _make_id(self, name: str) -> str:
         return name.upper().replace(' ', '_').replace('-', '_').replace('/', '_')
@@ -1167,16 +1160,20 @@ def render_layer3_dam_optimized():
             status = st.empty()
             status.info("📂 Loading precomputed DAM index...")
             
-            gene_to_pathways, gene_cooccurrence = load_precomputed_dam_or_fail(
+            
+            gene_to_pathways, pathways_dict = load_precomputed_dam_or_fail(
                 "data/dam_index_light.pkl"
             )
             
-            status.success(f"✅ DAM index loaded ({len(gene_to_pathways):,} genes)")
-
+            status.success(
+                f"✅ DAM index loaded "
+                f"({len(gene_to_pathways):,} genes, {len(pathways_dict):,} pathways)"
+            )
             
             # Expand signatures
             builder = SignatureBuilder()
-            builder.set_dam_index(gene_to_pathways, gene_cooccurrence)
+            builder.set_dam_index(gene_to_pathways, pathways_dict)
+
             
             signatures = [st.session_state.signature_cache[sid] for sid in st.session_state.signature_ids]
             
