@@ -36,11 +36,16 @@ import pickle
 from db_client import DatabaseClient
 from material_design_theme import (
     inject_material_theme,
+    material_text_field,
     material_text_area,
     material_slider,
+    material_select,
+    material_multiselect,
     material_checkbox,
     material_button,
+    material_download_button,
 )
+
 
 
 # ============================================================
@@ -738,14 +743,16 @@ def render_generation_tab():
         st.warning("⚠️ Please validate HuggingFace token")
         return
     
+
     # Query input
     st.markdown("### Research Question")
-    query = st.text_area(
-        "",
+    query = material_text_area(
+        "Biological question or mechanism",
+        key="main_query",
         height=80,
-        placeholder="Example: Th17 role in obesity",
-        key="main_query"
+        placeholder="Example: Th17 role in obesity"
     )
+
     
     # Parameters
     col1, col2, col3 = st.columns(3)
@@ -863,10 +870,11 @@ def render_layer1_granularity(query, target_count, min_genes, max_genes):
             with col1:
                 is_selected = facet['facet_id'] in st.session_state.selected_mechanism_ids
                 
+                
                 if material_checkbox(
-                    "",
-                    value=is_selected,
+                    f"select_{facet['facet_id']}",
                     key=f"checkbox_{facet['facet_id']}",
+                    value=is_selected,
                     label_visibility="collapsed"
                 ):
                     if facet['facet_id'] not in st.session_state.selected_mechanism_ids:
