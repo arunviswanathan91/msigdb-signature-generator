@@ -30,7 +30,8 @@ from dataclasses import dataclass, field
 from collections import Counter, defaultdict
 import hashlib
 import pickle
-
+from db_client import DatabaseClient
+from material_ui_css import inject_material_ui_css
 # ============================================================
 # DATA CLASSES
 # ============================================================
@@ -572,7 +573,7 @@ If no changes needed, return empty lists."""
 # UI STYLING
 # ============================================================
 
-def inject_modern_css():
+def inject_material_ui_css():
     st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
@@ -1133,23 +1134,19 @@ def render_layer2_semantic_optimized(query, min_genes, max_genes):
 # ============================================================
 # LAYER 3 - OPTIMIZED DAM
 # ============================================================
-
 def render_layer3_dam_optimized():
-    """Layer 3: OPTIMIZED DAM expansion with precomputed index"""
+    """Layer 3: DAM expansion with REMOTE API"""
     
     st.markdown("---")
-    st.markdown("### 🔬 Layer 3: DAM Expansion (Optimized)")
+    st.markdown("### 🔬 Layer 3: DAM Expansion (Remote)")
     
     st.markdown("""
     <div class="info-box">
-    ⚡ <strong>Performance boost:</strong> Precomputed index makes this 10x faster!
+    ⚡ <strong>REMOTE MODE:</strong> Queries remote database - no local files needed!
     </div>
     """, unsafe_allow_html=True)
     
-    enable_dam = st.checkbox(
-        "🔬 Enable DAM Expansion",
-        value=False
-    )
+    enable_dam = st.checkbox("🔬 Enable DAM Expansion", value=False)
     
     if enable_dam:
         col1, col2 = st.columns(2)
@@ -1160,66 +1157,71 @@ def render_layer3_dam_optimized():
         with col2:
             max_neighbors = st.slider("Max neighbors", 1, 10, 5, 1)
         
+        # Your API URL
+        api_url = "https://arunviswanathan91-msigdb-api.hf.space"
+        
         if st.button("🔬 Expand with DAM", type="primary", use_container_width=True):
             
             timing = LayerTiming("Layer 3: DAM Expansion", time.time())
             
-            pathways_dict = load_knowledge_base_cached()
-            
-            # Build index (cached)
-            status = st.empty()
-            status.info("📂 Loading precomputed DAM index...")
-            
-            
-            gene_to_pathways, pathways_dict = load_precomputed_dam_or_fail(
-                "data/dam_index_light.pkl"
-            )
-            
-            status.success(
-                f"✅ DAM index loaded "
-                f"({len(gene_to_pathways):,} genes, {len(pathways_dict):,} pathways)"
-            )
-            
-            # Expand signatures
-            builder = SignatureBuilder()
-            builder.set_dam_index(gene_to_pathways, pathways_dict)
-
-            
-            signatures = [st.session_state.signature_cache[sid] for sid in st.session_state.signature_ids]
-            
-            progress_bar = st.progress(0)
-            
-            for i, sig in enumerate(signatures):
-                status.info(f"Expanding: {sig.signature_name}...")
+            try:
+                status = st.empty()
+                status.info("🌐 Connecting to remote database...")
                 
-                expanded_sig = builder.expand_with_dam_fast(
-                    sig,
-                    expansion_strength=expansion_strength,
-                    max_additional=max_neighbors
+                db_api = DatabaseClient(api_url=api_url)
+                status.success("✅ Connected!")
+                
+                signatures = [
+                    st.session_state.signature_cache[sid] 
+                    for sid in st.session_state.signature_ids
+                ]
+                
+                progress_bar = st.progress(0)
+                progress_text = st.empty()
+                
+                total = len(signatures)
+                expanded_count = 0
+                
+                for i, sig in enumerate(signatures):
+                    progress_text.info(
+                        f"🔍 Querying API... signature {i+1}/{total}: {sig.signature_name}"
+                    )
+                    
+                    try:
+                        expanded_genes = db_api.expand_signature_smart(
+                            seed_genes=sig.genes,
+                            strength=expansion_strength,
+                            max_pathways_per_gene=max_neighbors
+                        )
+                        
+                        sig.genes = list(expanded_genes)
+                        sig.dam_expanded = True
+                        st.session_state.signature_cache[sig.signature_id] = sig
+                        expanded_count += 1
+                        
+                    except Exception as e:
+                        st.warning(f"⚠️ Failed: {sig.signature_name}")
+                    
+                    progress_bar.progress((i + 1) / total)
+                
+                timing.end_time = time.time()
+                st.session_state.layer_timings.append(timing)
+                st.session_state.dam_enabled = True
+                
+                progress_text.success(
+                    f"✅ Expanded {expanded_count}/{total} signatures!"
                 )
                 
-                # Update cache
-                st.session_state.signature_cache[sig.signature_id] = expanded_sig
+                time.sleep(1)
+                st.rerun()
                 
-                progress_bar.progress((i + 1) / len(signatures))
-            
-            timing.end_time = time.time()
-            st.session_state.layer_timings.append(timing)
-            st.session_state.dam_enabled = True
-            
-            status.success(f"✅ Expanded {len(signatures)} signatures!")
-            st.markdown(f'<span class="timing-badge">⏱️ {timing.duration_str}</span>', unsafe_allow_html=True)
-            
-            time.sleep(1)
-            st.rerun()
+            except Exception as e:
+                st.error(f"❌ Connection failed: {e}")
         
         if st.session_state.dam_enabled:
             st.success("✅ DAM expansion complete")
-    
     else:
         st.info("DAM disabled")
-
-
 # ============================================================
 # LAYER 4 - BATCH VERIFICATION
 # ============================================================
@@ -1474,7 +1476,7 @@ def main():
     )
     
     initialize_session_state()
-    inject_modern_css()
+    inject_material_ui_css()
     
     st.markdown("""
     <div style='text-align: center; padding: 32px 0 16px 0;'>
