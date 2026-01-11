@@ -721,7 +721,7 @@ def render_kb_tab():
         sample_pid = list(pathways.keys())[0]
         sample_genes = pathways[sample_pid]
         
-        with st.expander(" "):
+        with st.expander("Example signature"):
             st.caption(f"**{sample_pid}**")
             st.caption(f"Genes: {', '.join(sample_genes[:10])}... ({len(sample_genes)} total)")
     else:
