@@ -318,7 +318,7 @@ def inject_material_design_3():
     """, unsafe_allow_html=True)
 
 
-def material_slider(label, min_value=0, max_value=100, value=50, key=None, help_text=None):
+def material_slider(label, min_value=0, max_value=100, value=50, step=1, key=None, help_text=None, disabled=False, format=None):
     """
     Material Design 3 Slider with custom styling
     Returns the slider value
@@ -329,30 +329,47 @@ def material_slider(label, min_value=0, max_value=100, value=50, key=None, help_
         min_value=min_value,
         max_value=max_value,
         value=value,
+        step=step,
         key=key,
-        help=help_text
+        help=help_text,
+        disabled=disabled,
+        format=format
     )
 
 
-def material_button(label, key=None, on_click=None, type="primary"):
+def material_button(label, key=None, on_click=None, type="primary", use_container_width=False, disabled=False, help=None):
     """
     Material Design 3 Button
     Returns True if clicked
     """
-    return st.button(label, key=key, on_click=on_click)
+    return st.button(
+        label, 
+        key=key, 
+        on_click=on_click, 
+        type=type,
+        use_container_width=use_container_width,
+        disabled=disabled,
+        help=help
+    )
 
 
-def material_text_field(label, value="", key=None, placeholder="", help_text=None):
+def material_text_field(label, value="", key=None, placeholder="", help_text=None, type="default", max_chars=None, disabled=False):
     """
     Material Design 3 Filled Text Field
     Returns the text value
+    
+    Args:
+        type: "default" or "password"
     """
     return st.text_input(
         label=label,
         value=value,
         key=key,
         placeholder=placeholder,
-        help=help_text
+        help=help_text,
+        type=type,
+        max_chars=max_chars,
+        disabled=disabled
     )
 
 
