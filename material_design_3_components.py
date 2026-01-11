@@ -88,6 +88,11 @@ def inject_material_design_3():
         padding: 1.5rem 0 !important;
     }
     
+    /* Hide the default Streamlit slider value display */
+    .stSlider [data-baseweb="slider"] > div:first-child {
+        display: none !important;
+    }
+    
     .stSlider > div > div > div {
         background: var(--md-sys-color-primary) !important;
         height: 4px !important;
