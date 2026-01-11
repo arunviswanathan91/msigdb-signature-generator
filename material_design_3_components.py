@@ -318,7 +318,7 @@ def inject_material_design_3():
     """, unsafe_allow_html=True)
 
 
-def material_slider(label, min_value=0, max_value=100, value=50, key=None, help_text=None):
+def material_slider(label, min_value=0, max_value=100, value=50, step=1, key=None, help=None, disabled=False, format=None):
     """
     Material Design 3 Slider with custom styling
     Returns the slider value
@@ -329,20 +329,31 @@ def material_slider(label, min_value=0, max_value=100, value=50, key=None, help_
         min_value=min_value,
         max_value=max_value,
         value=value,
+        step=step,
         key=key,
-        help=help_text
+        help=help,
+        disabled=disabled,
+        format=format
     )
 
 
-def material_button(label, key=None, on_click=None, type="primary"):
+def material_button(label, key=None, on_click=None, type="primary", use_container_width=False, disabled=False, help=None):
     """
     Material Design 3 Button
     Returns True if clicked
     """
-    return st.button(label, key=key, on_click=on_click)
+    return st.button(
+        label, 
+        key=key, 
+        on_click=on_click, 
+        type=type,
+        use_container_width=use_container_width,
+        disabled=disabled,
+        help=help
+    )
 
 
-def material_text_field(label, value="", key=None, placeholder="", help_text=None):
+def material_text_field(label, value="", key=None, placeholder="", help=None, type="default", max_chars=None, disabled=False):
     """
     Material Design 3 Filled Text Field
     Returns the text value
@@ -352,11 +363,14 @@ def material_text_field(label, value="", key=None, placeholder="", help_text=Non
         value=value,
         key=key,
         placeholder=placeholder,
-        help=help_text
+        help=help,
+        type=type,
+        max_chars=max_chars,
+        disabled=disabled
     )
 
 
-def material_select(label, options, index=0, key=None, help_text=None):
+def material_select(label, options, index=0, key=None, help=None, disabled=False, format_func=None):
     """
     Material Design 3 Filled Dropdown
     Returns the selected value
@@ -366,7 +380,41 @@ def material_select(label, options, index=0, key=None, help_text=None):
         options=options,
         index=index,
         key=key,
-        help=help_text
+        help=help,
+        disabled=disabled,
+        format_func=format_func
+    )
+
+
+def material_checkbox(label, value=False, key=None, help=None, disabled=False, label_visibility="visible"):
+    """
+    Material Design 3 Checkbox
+    Returns the checkbox state
+    """
+    return st.checkbox(
+        label=label,
+        value=value,
+        key=key,
+        help=help,
+        disabled=disabled,
+        label_visibility=label_visibility
+    )
+
+
+def material_multiselect(label, options, default=None, key=None, help=None, disabled=False, format_func=None, max_selections=None):
+    """
+    Material Design 3 Multi-Select
+    Returns the selected values
+    """
+    return st.multiselect(
+        label=label,
+        options=options,
+        default=default,
+        key=key,
+        help=help,
+        disabled=disabled,
+        format_func=format_func,
+        max_selections=max_selections
     )
 
 
