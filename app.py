@@ -34,7 +34,7 @@ from collections import Counter, defaultdict
 import hashlib
 import pickle
 from db_client import DatabaseClient
-from material_ui_css import inject_material_ui_css
+from material_design_3_components import inject_material_design_3
 
 # ============================================================
 # DATA CLASSES
@@ -1447,7 +1447,7 @@ def main():
     )
     
     initialize_session_state()
-    inject_material_ui_css()
+    inject_material_design_3()
     
     st.markdown("""
     <div style='text-align: center; padding: 32px 0 16px 0;'>
