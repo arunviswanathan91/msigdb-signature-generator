@@ -1,541 +1,698 @@
 """
-Material UI Inspired CSS
-Replace inject_modern_css() function in your app with this
+REAL Material UI CSS - Beautiful Modern Design
+Inspired by mui.com - Clean, Professional, Modern
 """
+
 import streamlit as st
+
+
 def inject_material_ui_css():
     st.markdown("""
     <style>
     /* ============================================================
-       MATERIAL UI INSPIRED DESIGN
-       Clean, minimal, with clear visual feedback
+       REAL MATERIAL UI DESIGN - Clean & Modern
+       Based on mui.com design system
        ============================================================ */
     
-    /* Import Roboto font (Material UI default) */
-    @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap');
+    /* Import Inter font (modern, clean) */
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
     
     /* ============================================================
-       GLOBAL STYLES
+       GLOBAL RESET & BASE
        ============================================================ */
     * {
-        font-family: 'Roboto', -apple-system, BlinkMacSystemFont, sans-serif;
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
     }
     
-    /* Main app background - clean light grey */
+    /* Main app - Clean white background */
     .stApp {
-        background: #fafafa;
+        background: #ffffff;
+    }
+    
+    /* Main container - Add breathing room */
+    .main .block-container {
+        padding-top: 3rem !important;
+        padding-bottom: 3rem !important;
+        max-width: 1200px !important;
     }
     
     /* ============================================================
-       TYPOGRAPHY
+       TYPOGRAPHY - Clean hierarchy
        ============================================================ */
     h1 {
-        font-size: 2.5rem !important;
-        font-weight: 400 !important;
-        color: #212121 !important;
-        margin-bottom: 8px !important;
-        letter-spacing: -0.5px !important;
+        font-size: 3rem !important;
+        font-weight: 700 !important;
+        color: #0A1929 !important;
+        letter-spacing: -0.02em !important;
+        margin-bottom: 0.5rem !important;
+        line-height: 1.2 !important;
     }
     
     h2 {
         font-size: 2rem !important;
-        font-weight: 400 !important;
-        color: #424242 !important;
-        margin-top: 32px !important;
-        margin-bottom: 16px !important;
+        font-weight: 600 !important;
+        color: #0A1929 !important;
+        margin-top: 3rem !important;
+        margin-bottom: 1rem !important;
+        letter-spacing: -0.01em !important;
     }
     
     h3 {
         font-size: 1.5rem !important;
-        font-weight: 500 !important;
-        color: #616161 !important;
-        margin-top: 24px !important;
-        margin-bottom: 12px !important;
+        font-weight: 600 !important;
+        color: #1E3A5F !important;
+        margin-top: 2rem !important;
+        margin-bottom: 1rem !important;
     }
     
     p, .stMarkdown {
-        color: #616161 !important;
-        line-height: 1.6 !important;
+        color: #3E5060 !important;
+        font-size: 1rem !important;
+        line-height: 1.7 !important;
+    }
+    
+    /* Subtle text */
+    .stCaption {
+        color: #5B7083 !important;
+        font-size: 0.875rem !important;
     }
     
     /* ============================================================
-       BUTTONS - Clear states with Material Design
+       BUTTONS - Beautiful Material Design
        ============================================================ */
     
-    /* Primary buttons */
+    /* Primary Button - Blue gradient */
     .stButton button[kind="primary"],
     .stButton button[data-testid="baseButton-primary"] {
-        background: #1976d2 !important;
-        color: white !important;
+        background: linear-gradient(135deg, #007FFF 0%, #0059B2 100%) !important;
+        color: #ffffff !important;
         border: none !important;
-        border-radius: 4px !important;
-        padding: 10px 24px !important;
-        font-weight: 500 !important;
-        font-size: 0.875rem !important;
-        text-transform: uppercase !important;
-        letter-spacing: 0.5px !important;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.08) !important;
-        transition: all 0.2s ease !important;
+        border-radius: 8px !important;
+        padding: 0.75rem 2rem !important;
+        font-weight: 600 !important;
+        font-size: 0.9375rem !important;
+        letter-spacing: 0.02em !important;
+        text-transform: none !important;
+        box-shadow: 0 1px 3px rgba(0, 127, 255, 0.3), 
+                    0 4px 8px rgba(0, 127, 255, 0.15) !important;
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+        cursor: pointer !important;
     }
     
-    .stButton button[kind="primary"]:hover,
-    .stButton button[data-testid="baseButton-primary"]:hover {
-        background: #1565c0 !important;
-        box-shadow: 0 4px 8px rgba(0,0,0,0.16), 0 2px 4px rgba(0,0,0,0.12) !important;
-        transform: translateY(-1px) !important;
+    .stButton button[kind="primary"]:hover {
+        background: linear-gradient(135deg, #0059B2 0%, #003D7A 100%) !important;
+        box-shadow: 0 4px 12px rgba(0, 127, 255, 0.35), 
+                    0 8px 20px rgba(0, 127, 255, 0.2) !important;
+        transform: translateY(-2px) !important;
     }
     
-    .stButton button[kind="primary"]:active,
-    .stButton button[data-testid="baseButton-primary"]:active {
-        background: #0d47a1 !important;
-        box-shadow: 0 1px 2px rgba(0,0,0,0.12) !important;
+    .stButton button[kind="primary"]:active {
         transform: translateY(0) !important;
+        box-shadow: 0 2px 4px rgba(0, 127, 255, 0.3) !important;
     }
     
-    /* Secondary buttons */
+    /* Secondary Button - Outlined */
     .stButton button[kind="secondary"],
     .stButton button {
-        background: white !important;
-        color: #1976d2 !important;
-        border: 1px solid #e0e0e0 !important;
-        border-radius: 4px !important;
-        padding: 10px 24px !important;
-        font-weight: 500 !important;
-        font-size: 0.875rem !important;
-        text-transform: uppercase !important;
-        letter-spacing: 0.5px !important;
-        box-shadow: 0 1px 2px rgba(0,0,0,0.08) !important;
-        transition: all 0.2s ease !important;
+        background: #ffffff !important;
+        color: #007FFF !important;
+        border: 1.5px solid #E3EFFB !important;
+        border-radius: 8px !important;
+        padding: 0.75rem 2rem !important;
+        font-weight: 600 !important;
+        font-size: 0.9375rem !important;
+        text-transform: none !important;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05) !important;
+        transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
+        cursor: pointer !important;
     }
     
     .stButton button[kind="secondary"]:hover,
     .stButton button:hover {
-        background: #f5f5f5 !important;
-        border-color: #1976d2 !important;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.12) !important;
+        background: #F0F7FF !important;
+        border-color: #B3D7FF !important;
+        box-shadow: 0 2px 8px rgba(0, 127, 255, 0.15) !important;
     }
     
-    .stButton button[kind="secondary"]:active,
-    .stButton button:active {
-        background: #eeeeee !important;
-        box-shadow: 0 1px 2px rgba(0,0,0,0.08) !important;
-    }
-    
-    /* Selected button state (for gene selection) */
-    .stButton button.selected {
-        background: #e3f2fd !important;
-        color: #1976d2 !important;
-        border: 2px solid #1976d2 !important;
-        font-weight: 600 !important;
-    }
-    
-    /* Disabled buttons */
+    /* Disabled state */
     .stButton button:disabled {
-        background: #f5f5f5 !important;
-        color: #bdbdbd !important;
-        border-color: #e0e0e0 !important;
+        background: #F3F6F9 !important;
+        color: #B0B8C4 !important;
+        border-color: #E7EBF0 !important;
         box-shadow: none !important;
         cursor: not-allowed !important;
+        opacity: 0.6 !important;
     }
     
     /* ============================================================
-       CHECKBOXES - Clear visual feedback
+       CARDS & CONTAINERS - Elevation system
        ============================================================ */
+    
+    /* Info boxes - Clean cards */
+    .info-box {
+        background: #F0F7FF !important;
+        border-left: 4px solid #007FFF !important;
+        border-radius: 12px !important;
+        padding: 1.25rem 1.5rem !important;
+        margin: 1.5rem 0 !important;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04) !important;
+        color: #1E3A5F !important;
+    }
+    
+    .info-box strong {
+        color: #0A1929 !important;
+        font-weight: 600 !important;
+    }
+    
+    /* Success */
+    .stSuccess, .success-box {
+        background: #F1FAF5 !important;
+        border-left: 4px solid #1AA251 !important;
+        border-radius: 12px !important;
+        padding: 1.25rem 1.5rem !important;
+        color: #1E4620 !important;
+        box-shadow: 0 2px 8px rgba(26, 162, 81, 0.1) !important;
+    }
+    
+    /* Warning */
+    .stWarning, .warning-box {
+        background: #FFF9E6 !important;
+        border-left: 4px solid #FFB400 !important;
+        border-radius: 12px !important;
+        padding: 1.25rem 1.5rem !important;
+        color: #5F3A00 !important;
+        box-shadow: 0 2px 8px rgba(255, 180, 0, 0.1) !important;
+    }
+    
+    /* Error */
+    .stError, .error-box {
+        background: #FFF0F1 !important;
+        border-left: 4px solid #E61E50 !important;
+        border-radius: 12px !important;
+        padding: 1.25rem 1.5rem !important;
+        color: #5F1A20 !important;
+        box-shadow: 0 2px 8px rgba(230, 30, 80, 0.1) !important;
+    }
+    
+    /* Info */
+    .stInfo {
+        background: #F0F7FF !important;
+        border-left: 4px solid #007FFF !important;
+        border-radius: 12px !important;
+        padding: 1.25rem 1.5rem !important;
+        color: #1E3A5F !important;
+        box-shadow: 0 2px 8px rgba(0, 127, 255, 0.1) !important;
+    }
+    
+    /* ============================================================
+       INPUTS - Modern form elements
+       ============================================================ */
+    
+    /* Text inputs */
+    .stTextInput input,
+    .stTextArea textarea,
+    .stNumberInput input {
+        border: 1.5px solid #E3EFFB !important;
+        border-radius: 10px !important;
+        padding: 0.875rem 1rem !important;
+        font-size: 1rem !important;
+        color: #0A1929 !important;
+        background: #ffffff !important;
+        transition: all 0.2s ease !important;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02) !important;
+    }
+    
+    .stTextInput input:hover,
+    .stTextArea textarea:hover,
+    .stNumberInput input:hover {
+        border-color: #B3D7FF !important;
+        box-shadow: 0 2px 8px rgba(0, 127, 255, 0.08) !important;
+    }
+    
+    .stTextInput input:focus,
+    .stTextArea textarea:focus,
+    .stNumberInput input:focus {
+        border-color: #007FFF !important;
+        box-shadow: 0 0 0 3px rgba(0, 127, 255, 0.1) !important;
+        outline: none !important;
+    }
+    
+    /* Text area specific */
+    .stTextArea textarea {
+        min-height: 120px !important;
+    }
+    
+    /* Input labels */
+    .stTextInput label,
+    .stTextArea label,
+    .stNumberInput label {
+        color: #1E3A5F !important;
+        font-weight: 500 !important;
+        font-size: 0.875rem !important;
+        margin-bottom: 0.5rem !important;
+    }
+    
+    /* ============================================================
+       CHECKBOXES - Modern toggle style
+       ============================================================ */
+    
     .stCheckbox {
-        padding: 8px 0 !important;
+        padding: 0.75rem 0 !important;
     }
     
     .stCheckbox > label {
         display: flex !important;
         align-items: center !important;
         cursor: pointer !important;
-        padding: 12px !important;
-        border-radius: 4px !important;
+        padding: 0.75rem 1rem !important;
+        border-radius: 10px !important;
         transition: background 0.2s ease !important;
     }
     
     .stCheckbox > label:hover {
-        background: #f5f5f5 !important;
+        background: #F0F7FF !important;
     }
     
-    /* Checkbox input */
     .stCheckbox input[type="checkbox"] {
-        width: 20px !important;
-        height: 20px !important;
+        width: 22px !important;
+        height: 22px !important;
         cursor: pointer !important;
-        accent-color: #1976d2 !important;
+        accent-color: #007FFF !important;
+        border-radius: 6px !important;
+    }
+    
+    .stCheckbox span {
+        color: #1E3A5F !important;
+        font-weight: 500 !important;
     }
     
     /* ============================================================
-       SLIDERS - Material Design style
+       SLIDERS - Beautiful range inputs
        ============================================================ */
+    
+    .stSlider {
+        padding: 1rem 0 !important;
+    }
+    
     .stSlider > div > div > div {
-        background: #1976d2 !important;
+        background: linear-gradient(90deg, #007FFF 0%, #0059B2 100%) !important;
+        height: 6px !important;
+        border-radius: 3px !important;
     }
     
     .stSlider > div > div > div > div {
-        background: #1976d2 !important;
-        border: 2px solid white !important;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.2) !important;
+        background: #ffffff !important;
+        border: 3px solid #007FFF !important;
+        width: 20px !important;
+        height: 20px !important;
+        box-shadow: 0 2px 8px rgba(0, 127, 255, 0.3) !important;
+        transition: all 0.2s ease !important;
     }
     
     .stSlider > div > div > div > div:hover {
-        box-shadow: 0 0 0 8px rgba(25, 118, 210, 0.16) !important;
+        transform: scale(1.2) !important;
+        box-shadow: 0 4px 12px rgba(0, 127, 255, 0.4) !important;
     }
     
     /* ============================================================
-       TEXT INPUTS - Clear borders and focus states
+       SELECT BOXES - Dropdown styling
        ============================================================ */
-    .stTextInput input,
-    .stTextArea textarea {
-        border: 1px solid #e0e0e0 !important;
-        border-radius: 4px !important;
-        padding: 12px !important;
-        font-size: 1rem !important;
+    
+    .stSelectbox > div > div {
+        border: 1.5px solid #E3EFFB !important;
+        border-radius: 10px !important;
+        background: #ffffff !important;
         transition: all 0.2s ease !important;
-        background: white !important;
+        padding: 0.5rem !important;
     }
     
-    .stTextInput input:hover,
-    .stTextArea textarea:hover {
-        border-color: #bdbdbd !important;
+    .stSelectbox > div > div:hover {
+        border-color: #B3D7FF !important;
+        box-shadow: 0 2px 8px rgba(0, 127, 255, 0.08) !important;
     }
     
-    .stTextInput input:focus,
-    .stTextArea textarea:focus {
-        border-color: #1976d2 !important;
-        box-shadow: 0 0 0 2px rgba(25, 118, 210, 0.2) !important;
-        outline: none !important;
-    }
-    
-    /* ============================================================
-       CARDS / INFO BOXES - Material elevation
-       ============================================================ */
-    .info-box {
-        background: white !important;
-        border-left: 4px solid #1976d2 !important;
-        padding: 16px 20px !important;
-        border-radius: 4px !important;
-        margin: 16px 0 !important;
-        color: #424242 !important;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.08) !important;
-    }
-    
-    .info-box strong {
-        color: #212121 !important;
-    }
-    
-    /* Success boxes */
-    .stSuccess {
-        background: #e8f5e9 !important;
-        border-left: 4px solid #4caf50 !important;
-        padding: 16px 20px !important;
-        border-radius: 4px !important;
-        color: #2e7d32 !important;
-    }
-    
-    /* Warning boxes */
-    .stWarning {
-        background: #fff3e0 !important;
-        border-left: 4px solid #ff9800 !important;
-        padding: 16px 20px !important;
-        border-radius: 4px !important;
-        color: #e65100 !important;
-    }
-    
-    /* Error boxes */
-    .stError {
-        background: #ffebee !important;
-        border-left: 4px solid #f44336 !important;
-        padding: 16px 20px !important;
-        border-radius: 4px !important;
-        color: #c62828 !important;
-    }
-    
-    /* Info boxes */
-    .stInfo {
-        background: #e3f2fd !important;
-        border-left: 4px solid #2196f3 !important;
-        padding: 16px 20px !important;
-        border-radius: 4px !important;
-        color: #1565c0 !important;
+    .stSelectbox > div > div:focus-within {
+        border-color: #007FFF !important;
+        box-shadow: 0 0 0 3px rgba(0, 127, 255, 0.1) !important;
     }
     
     /* ============================================================
-       EXPANDERS - Card style with clear expand indicator
+       RADIO BUTTONS - Card style selection
        ============================================================ */
+    
+    .stRadio > div {
+        gap: 0.75rem !important;
+    }
+    
+    .stRadio > div > label {
+        background: #ffffff !important;
+        border: 1.5px solid #E3EFFB !important;
+        border-radius: 10px !important;
+        padding: 1rem 1.5rem !important;
+        cursor: pointer !important;
+        transition: all 0.2s ease !important;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02) !important;
+    }
+    
+    .stRadio > div > label:hover {
+        background: #F0F7FF !important;
+        border-color: #B3D7FF !important;
+        box-shadow: 0 2px 8px rgba(0, 127, 255, 0.08) !important;
+    }
+    
+    .stRadio > div > label[data-checked="true"] {
+        background: #E6F4FF !important;
+        border-color: #007FFF !important;
+        border-width: 2px !important;
+        box-shadow: 0 2px 8px rgba(0, 127, 255, 0.15) !important;
+        font-weight: 600 !important;
+        color: #0A1929 !important;
+    }
+    
+    /* ============================================================
+       EXPANDERS - Accordion style
+       ============================================================ */
+    
     .streamlit-expanderHeader {
-        background: white !important;
-        border: 1px solid #e0e0e0 !important;
-        border-radius: 4px !important;
-        padding: 12px 16px !important;
+        background: #ffffff !important;
+        border: 1.5px solid #E7EBF0 !important;
+        border-radius: 12px !important;
+        padding: 1rem 1.5rem !important;
         font-weight: 500 !important;
-        color: #424242 !important;
+        color: #1E3A5F !important;
         transition: all 0.2s ease !important;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02) !important;
     }
     
     .streamlit-expanderHeader:hover {
-        background: #f5f5f5 !important;
-        border-color: #bdbdbd !important;
+        background: #F3F6F9 !important;
+        border-color: #B3D7FF !important;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04) !important;
     }
     
     .streamlit-expanderContent {
-        border: 1px solid #e0e0e0 !important;
+        border: 1.5px solid #E7EBF0 !important;
         border-top: none !important;
-        border-radius: 0 0 4px 4px !important;
-        padding: 16px !important;
-        background: white !important;
+        border-radius: 0 0 12px 12px !important;
+        padding: 1.5rem !important;
+        background: #FAFBFC !important;
     }
     
     /* ============================================================
-       TABS - Material Design style
+       TABS - Clean navigation
        ============================================================ */
+    
     .stTabs [data-baseweb="tab-list"] {
-        gap: 0 !important;
-        background: white !important;
-        border-bottom: 2px solid #e0e0e0 !important;
+        gap: 0.5rem !important;
+        background: transparent !important;
+        border-bottom: 2px solid #E7EBF0 !important;
+        padding-bottom: 0 !important;
     }
     
     .stTabs [data-baseweb="tab"] {
-        padding: 12px 24px !important;
-        color: #757575 !important;
+        padding: 1rem 1.5rem !important;
+        color: #5B7083 !important;
         font-weight: 500 !important;
         border: none !important;
         background: transparent !important;
         transition: all 0.2s ease !important;
+        border-radius: 8px 8px 0 0 !important;
     }
     
     .stTabs [data-baseweb="tab"]:hover {
-        background: #f5f5f5 !important;
-        color: #424242 !important;
+        background: #F0F7FF !important;
+        color: #007FFF !important;
     }
     
     .stTabs [data-baseweb="tab"][aria-selected="true"] {
-        color: #1976d2 !important;
-        border-bottom: 2px solid #1976d2 !important;
+        color: #007FFF !important;
+        border-bottom: 3px solid #007FFF !important;
         background: transparent !important;
+        font-weight: 600 !important;
+    }
+    
+    /* Tab content */
+    .stTabs [data-baseweb="tab-panel"] {
+        padding-top: 2rem !important;
     }
     
     /* ============================================================
-       METRICS - Card style
+       METRICS - Stats cards
        ============================================================ */
+    
     [data-testid="stMetricValue"] {
-        font-size: 2rem !important;
-        font-weight: 500 !important;
-        color: #212121 !important;
+        font-size: 2.5rem !important;
+        font-weight: 700 !important;
+        color: #0A1929 !important;
+        background: linear-gradient(135deg, #007FFF 0%, #0059B2 100%);
+        -webkit-background-clip: text !important;
+        -webkit-text-fill-color: transparent !important;
+        background-clip: text !important;
     }
     
     [data-testid="stMetricLabel"] {
         font-size: 0.875rem !important;
-        font-weight: 500 !important;
-        color: #757575 !important;
+        font-weight: 600 !important;
+        color: #5B7083 !important;
         text-transform: uppercase !important;
-        letter-spacing: 0.5px !important;
+        letter-spacing: 0.05em !important;
+    }
+    
+    [data-testid="stMetricDelta"] {
+        font-size: 0.875rem !important;
+        font-weight: 500 !important;
     }
     
     /* ============================================================
-       PROGRESS BARS - Material Design
+       PROGRESS BARS - Smooth animation
        ============================================================ */
+    
     .stProgress > div > div {
-        background: #e0e0e0 !important;
-        border-radius: 4px !important;
-        height: 8px !important;
+        background: #E7EBF0 !important;
+        border-radius: 10px !important;
+        height: 10px !important;
     }
     
     .stProgress > div > div > div {
-        background: #1976d2 !important;
-        border-radius: 4px !important;
+        background: linear-gradient(90deg, #007FFF 0%, #0059B2 100%) !important;
+        border-radius: 10px !important;
+        animation: progressShine 2s ease infinite !important;
+    }
+    
+    @keyframes progressShine {
+        0% { opacity: 1; }
+        50% { opacity: 0.85; }
+        100% { opacity: 1; }
     }
     
     /* ============================================================
-       SIDEBAR - Clean material style
+       SIDEBAR - Clean navigation panel
        ============================================================ */
+    
     [data-testid="stSidebar"] {
-        background: white !important;
-        border-right: 1px solid #e0e0e0 !important;
+        background: #FAFBFC !important;
+        border-right: 1px solid #E7EBF0 !important;
+        padding: 2rem 1.5rem !important;
     }
     
     [data-testid="stSidebar"] .stMarkdown {
-        color: #424242 !important;
+        color: #3E5060 !important;
+    }
+    
+    [data-testid="stSidebar"] h3 {
+        color: #0A1929 !important;
+        font-size: 1.125rem !important;
+        font-weight: 600 !important;
+        margin-top: 1.5rem !important;
+    }
+    
+    /* Sidebar buttons */
+    [data-testid="stSidebar"] .stButton button {
+        width: 100% !important;
+        justify-content: center !important;
     }
     
     /* ============================================================
-       SELECT BOXES - Material style
+       DOWNLOAD BUTTON - Special styling
        ============================================================ */
-    .stSelectbox > div > div {
-        border: 1px solid #e0e0e0 !important;
-        border-radius: 4px !important;
-        background: white !important;
-        transition: all 0.2s ease !important;
-    }
     
-    .stSelectbox > div > div:hover {
-        border-color: #bdbdbd !important;
-    }
-    
-    .stSelectbox > div > div:focus-within {
-        border-color: #1976d2 !important;
-        box-shadow: 0 0 0 2px rgba(25, 118, 210, 0.2) !important;
-    }
-    
-    /* ============================================================
-       RADIO BUTTONS - Clear selection
-       ============================================================ */
-    .stRadio > div {
-        gap: 8px !important;
-    }
-    
-    .stRadio > div > label {
-        background: white !important;
-        border: 1px solid #e0e0e0 !important;
-        border-radius: 4px !important;
-        padding: 12px 16px !important;
-        cursor: pointer !important;
-        transition: all 0.2s ease !important;
-    }
-    
-    .stRadio > div > label:hover {
-        background: #f5f5f5 !important;
-        border-color: #bdbdbd !important;
-    }
-    
-    .stRadio > div > label[data-checked="true"] {
-        background: #e3f2fd !important;
-        border-color: #1976d2 !important;
-        border-width: 2px !important;
-        font-weight: 500 !important;
-    }
-    
-    /* ============================================================
-       NUMBER INPUT - Material style
-       ============================================================ */
-    .stNumberInput input {
-        border: 1px solid #e0e0e0 !important;
-        border-radius: 4px !important;
-        padding: 12px !important;
-        background: white !important;
-        transition: all 0.2s ease !important;
-    }
-    
-    .stNumberInput input:hover {
-        border-color: #bdbdbd !important;
-    }
-    
-    .stNumberInput input:focus {
-        border-color: #1976d2 !important;
-        box-shadow: 0 0 0 2px rgba(25, 118, 210, 0.2) !important;
-        outline: none !important;
-    }
-    
-    /* ============================================================
-       DOWNLOAD BUTTON - Material style
-       ============================================================ */
     .stDownloadButton button {
-        background: #4caf50 !important;
-        color: white !important;
+        background: linear-gradient(135deg, #1AA251 0%, #0D7D3A 100%) !important;
+        color: #ffffff !important;
         border: none !important;
-        border-radius: 4px !important;
-        padding: 10px 24px !important;
-        font-weight: 500 !important;
-        text-transform: uppercase !important;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.12) !important;
+        border-radius: 8px !important;
+        padding: 0.75rem 2rem !important;
+        font-weight: 600 !important;
+        box-shadow: 0 2px 8px rgba(26, 162, 81, 0.25) !important;
         transition: all 0.2s ease !important;
     }
     
     .stDownloadButton button:hover {
-        background: #43a047 !important;
-        box-shadow: 0 4px 8px rgba(0,0,0,0.16) !important;
-        transform: translateY(-1px) !important;
+        background: linear-gradient(135deg, #0D7D3A 0%, #0A5A2A 100%) !important;
+        box-shadow: 0 4px 12px rgba(26, 162, 81, 0.35) !important;
+        transform: translateY(-2px) !important;
     }
     
     /* ============================================================
-       SPINNER - Material Design
+       SPINNER - Loading animation
        ============================================================ */
+    
     .stSpinner > div {
-        border-color: #1976d2 transparent transparent transparent !important;
+        border-color: #007FFF #E7EBF0 #E7EBF0 #E7EBF0 !important;
+        border-width: 3px !important;
     }
     
     /* ============================================================
-       REMOVE UNNECESSARY ELEMENTS
+       DATAFRAME / TABLE - Clean table style
        ============================================================ */
     
-    /* Remove Streamlit branding if you want */
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
+    .stDataFrame {
+        border: 1.5px solid #E7EBF0 !important;
+        border-radius: 12px !important;
+        overflow: hidden !important;
+    }
+    
+    [data-testid="stDataFrame"] th {
+        background: #F3F6F9 !important;
+        color: #1E3A5F !important;
+        font-weight: 600 !important;
+        padding: 1rem !important;
+        border-bottom: 2px solid #E7EBF0 !important;
+    }
+    
+    [data-testid="stDataFrame"] td {
+        padding: 0.875rem 1rem !important;
+        border-bottom: 1px solid #F3F6F9 !important;
+    }
+    
+    [data-testid="stDataFrame"] tr:hover {
+        background: #F0F7FF !important;
+    }
     
     /* ============================================================
-       CUSTOM CLASSES FOR YOUR APP
+       CUSTOM CLASSES - Special elements
        ============================================================ */
     
     /* Timing badge */
     .timing-badge {
         display: inline-block;
-        background: #e3f2fd;
-        color: #1565c0;
-        padding: 4px 12px;
-        border-radius: 16px;
-        font-size: 0.875rem;
-        font-weight: 500;
-        margin-left: 8px;
+        background: linear-gradient(135deg, #E6F4FF 0%, #D6EBFF 100%);
+        color: #0059B2;
+        padding: 0.375rem 0.875rem;
+        border-radius: 20px;
+        font-size: 0.8125rem;
+        font-weight: 600;
+        margin-left: 0.75rem;
+        box-shadow: 0 2px 4px rgba(0, 127, 255, 0.15);
     }
     
-    /* Gene selection buttons - selected state */
-    .gene-button-selected {
-        background: #e3f2fd !important;
-        color: #1976d2 !important;
-        border: 2px solid #1976d2 !important;
-        font-weight: 600 !important;
-    }
-    
-    /* Gene selection buttons - unselected state */
-    .gene-button-unselected {
-        background: white !important;
-        color: #9e9e9e !important;
-        border: 1px solid #e0e0e0 !important;
-        opacity: 0.6 !important;
-        text-decoration: line-through !important;
-    }
-    
-    /* Status indicators */
+    /* Status badges */
     .status-badge {
         display: inline-block;
-        padding: 4px 12px;
-        border-radius: 16px;
-        font-size: 0.875rem;
-        font-weight: 500;
+        padding: 0.375rem 0.875rem;
+        border-radius: 20px;
+        font-size: 0.8125rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
     }
     
     .status-success {
-        background: #e8f5e9;
-        color: #2e7d32;
+        background: #E8F5E9;
+        color: #1AA251;
     }
     
     .status-warning {
-        background: #fff3e0;
-        color: #e65100;
+        background: #FFF9E6;
+        color: #BF7A00;
     }
     
     .status-error {
-        background: #ffebee;
-        color: #c62828;
+        background: #FFF0F1;
+        color: #E61E50;
     }
     
     .status-info {
-        background: #e3f2fd;
-        color: #1565c0;
+        background: #E6F4FF;
+        color: #0059B2;
+    }
+    
+    /* ============================================================
+       HIDE STREAMLIT BRANDING - Optional
+       ============================================================ */
+    
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    
+    /* Hide "Deploy" button */
+    .stDeployButton {display: none;}
+    
+    /* ============================================================
+       ANIMATIONS - Smooth micro-interactions
+       ============================================================ */
+    
+    @keyframes fadeIn {
+        from {
+            opacity: 0;
+            transform: translateY(10px);
+        }
+        to {
+            opacity: 1;
+            transform: translateY(0);
+        }
+    }
+    
+    .stMarkdown, .stButton, .stTextInput {
+        animation: fadeIn 0.3s ease-out;
     }
     
     /* ============================================================
        RESPONSIVE DESIGN
        ============================================================ */
+    
     @media (max-width: 768px) {
         h1 {
             font-size: 2rem !important;
         }
         
+        h2 {
+            font-size: 1.5rem !important;
+        }
+        
         .stButton button {
             width: 100% !important;
         }
+        
+        .main .block-container {
+            padding-left: 1rem !important;
+            padding-right: 1rem !important;
+        }
+    }
+    
+    /* ============================================================
+       SCROLLBAR - Custom styling
+       ============================================================ */
+    
+    ::-webkit-scrollbar {
+        width: 12px;
+        height: 12px;
+    }
+    
+    ::-webkit-scrollbar-track {
+        background: #F3F6F9;
+        border-radius: 10px;
+    }
+    
+    ::-webkit-scrollbar-thumb {
+        background: linear-gradient(135deg, #B3D7FF 0%, #91C5FF 100%);
+        border-radius: 10px;
+        border: 2px solid #F3F6F9;
+    }
+    
+    ::-webkit-scrollbar-thumb:hover {
+        background: linear-gradient(135deg, #91C5FF 0%, #007FFF 100%);
     }
     
     </style>
