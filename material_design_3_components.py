@@ -361,10 +361,10 @@ def material_select(label, options, index=0, key=None, help_text=None):
     Material Design 3 Filled Dropdown
     Returns the selected value
     """
-    #  Ensure key is unique if not provided
+    # Auto-generate unique key if not provided to avoid duplicate widget errors
     if key is None:
         import hashlib
-        key = "select_" + hashlib.md5(f"{label}{options}".encode()).hexdigest()[:8]
+        key = "select_" + hashlib.md5(f"{label}{str(options)}".encode()).hexdigest()[:8]
     
     return st.selectbox(
         label=label,
@@ -373,6 +373,53 @@ def material_select(label, options, index=0, key=None, help_text=None):
         key=key,
         help=help_text
     )
+
+
+def material_checkbox(label, value=False, key=None, help_text=None, disabled=False, label_visibility="visible"):
+    """
+    Material Design 3 Checkbox
+    Returns the checkbox state
+    """
+    # Auto-generate unique key if not provided
+    if key is None:
+        import hashlib
+        key = "checkbox_" + hashlib.md5(f"{label}{str(value)}".encode()).hexdigest()[:8]
+    
+    return st.checkbox(
+        label=label,
+        value=value,
+        key=key,
+        help=help_text,
+        disabled=disabled,
+        label_visibility=label_visibility
+    )
+
+
+def material_multiselect(label, options, default=None, key=None, help_text=None, disabled=False, format_func=None, max_selections=None):
+    """
+    Material Design 3 Multi-Select
+    Returns the selected values
+    """
+    # Auto-generate unique key if not provided
+    if key is None:
+        import hashlib
+        key = "multiselect_" + hashlib.md5(f"{label}{str(options)}".encode()).hexdigest()[:8]
+    
+    kwargs = {
+        'label': label,
+        'options': options,
+        'default': default,
+        'key': key,
+        'help': help_text,
+        'disabled': disabled
+    }
+    
+    if format_func is not None:
+        kwargs['format_func'] = format_func
+    if max_selections is not None:
+        kwargs['max_selections'] = max_selections
+    
+    return st.multiselect(**kwargs)
 
 
 def material_card(content, elevation=1):
