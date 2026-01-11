@@ -1,5 +1,36 @@
-# material_design_theme.py
 import streamlit as st
+
+# ==============================================================================
+# 1. WRAPPER FUNCTIONS (Fixes ImportError)
+# ==============================================================================
+
+def material_text_field(label, value="", type="default", help=None, key=None):
+    return st.text_input(label, value=value, type=type, help=help, key=key)
+
+def material_text_area(label, value="", height=None, placeholder=None, key=None):
+    return st.text_area(label, value=value, height=height, placeholder=placeholder, key=key)
+
+def material_slider(label, min_value, max_value, value, step=None, help=None, key=None):
+    return st.slider(label, min_value, max_value, value, step=step, help=help, key=key)
+
+def material_select(label, options, index=0, key=None, help=None):
+    return st.selectbox(label, options, index=index, key=key, help=help)
+
+def material_multiselect(label, options, default=None, key=None, help=None):
+    return st.multiselect(label, options, default=default, key=key, help=help)
+
+def material_checkbox(label, value=False, key=None, help=None, label_visibility="visible"):
+    return st.checkbox(label, value=value, key=key, help=help, label_visibility=label_visibility)
+
+def material_button(label, key=None, type="secondary", use_container_width=False, on_click=None):
+    return st.button(label, key=key, type=type, use_container_width=use_container_width, on_click=on_click)
+
+def material_download_button(label, data, file_name=None, mime=None, key=None, use_container_width=False):
+    return st.download_button(label, data, file_name=file_name, mime=mime, key=key, use_container_width=use_container_width)
+
+# ==============================================================================
+# 2. CSS INJECTION (Fixes UI Glitches)
+# ==============================================================================
 
 def inject_material_theme():
     st.markdown("""
@@ -15,20 +46,17 @@ def inject_material_theme():
     :root {
         --md-primary: #6DBAFF;
         --md-primary-hover: #82C7FF;
-
         --md-bg: #0F1419;
         --md-surface: #1B2025;
         --md-surface-high: #262B30;
-
         --md-text: #E1E2E5;
         --md-text-muted: #AAB2BD;
-
         --md-border: #3A4248;
         --md-radius: 14px;
     }
 
     /* =========================================================
-       BASE APP (⚠️ NO GLOBAL * SELECTOR)
+       BASE APP
        ========================================================= */
     .stApp {
         background-color: var(--md-bg);
@@ -36,15 +64,11 @@ def inject_material_theme():
         font-family: 'Roboto', sans-serif;
     }
 
-    /* Streamlit main container */
     .block-container {
         padding-top: 2rem;
         max-width: 100%;
     }
 
-    /* =========================================================
-       TEXT & TYPOGRAPHY
-       ========================================================= */
     p, span, div {
         line-height: 1.5;
     }
@@ -56,19 +80,27 @@ def inject_material_theme():
     }
 
     /* =========================================================
-       INPUTS (TEXT / AREA / SELECT) – FIXED
+       INPUTS (TEXT / AREA / SELECT)
        ========================================================= */
-    input, textarea, select {
+    /* Applied to text inputs and select boxes, but NOT textareas to preserve height control */
+    input, select {
         background-color: var(--md-surface-high) !important;
         color: var(--md-text) !important;
-
         border-radius: var(--md-radius) !important;
         border: 1px solid var(--md-border) !important;
-
         padding: 0.6rem 0.8rem !important;
         line-height: 1.5 !important;
-
-        height: auto !important;
+        box-sizing: border-box !important;
+    }
+    
+    /* Text Areas need special handling to allow resizing and custom height */
+    textarea {
+        background-color: var(--md-surface-high) !important;
+        color: var(--md-text) !important;
+        border-radius: var(--md-radius) !important;
+        border: 1px solid var(--md-border) !important;
+        padding: 0.6rem 0.8rem !important;
+        line-height: 1.5 !important;
         box-sizing: border-box !important;
     }
 
@@ -84,14 +116,11 @@ def inject_material_theme():
     .stButton > button {
         background-color: var(--md-primary);
         color: #002A45;
-
         border-radius: 999px;
         border: none;
-
         padding: 0.6rem 1.6rem;
         font-weight: 500;
         line-height: 1.2;
-
         transition: background-color 0.15s ease, transform 0.15s ease;
     }
 
@@ -104,6 +133,13 @@ def inject_material_theme():
         transform: translateY(0);
     }
 
+    /* Secondary buttons (outlined style if needed, or just less prominent) */
+    button[kind="secondary"] {
+        background-color: transparent !important;
+        border: 1px solid var(--md-border) !important;
+        color: var(--md-text) !important;
+    }
+
     /* =========================================================
        SIDEBAR
        ========================================================= */
@@ -113,17 +149,15 @@ def inject_material_theme():
     }
 
     /* =========================================================
-       EXPANDERS, MARKDOWN, CONTAINERS (CRITICAL SAFETY)
+       CONTAINER FIXES
        ========================================================= */
+    /* Removing height: auto !important from stTextArea to allow python height param to work */
     .element-container,
     .stMarkdown,
     .stExpander,
     .stTextInput,
-    .stTextArea,
     .stSelectbox {
         overflow: visible !important;
-        height: auto !important;
-        min-height: unset !important;
     }
 
     /* =========================================================
@@ -173,7 +207,7 @@ def inject_material_theme():
     }
 
     /* =========================================================
-       STREAMLIT BRANDING HIDE (OPTIONAL)
+       UTILITIES
        ========================================================= */
     #MainMenu { visibility: hidden; }
     footer { visibility: hidden; }
