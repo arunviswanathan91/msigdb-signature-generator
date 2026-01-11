@@ -25,3 +25,4 @@ packaging>=23.0
 
 # Additional dependencies for KB building
 tqdm>=4.65.0
+requests
