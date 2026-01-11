@@ -713,20 +713,30 @@ def render_sidebar():
                 help="Get at huggingface.co/settings/tokens"
             )
             
+
             if st.button("Validate Token"):
                 try:
                     from huggingface_hub import InferenceClient
-                    client = InferenceClient(token=token_input)
+                    InferenceClient(token=token_input)
                     st.session_state.hf_token = token_input
                     st.session_state.token_validated = True
-                    st.success("✅ Valid!")
-                    time.sleep(0.5)
+                    st.session_state.token_error = False
                     st.rerun()
-                except:
-                    st.error("❌ Invalid")
+                except Exception:
+                    st.session_state.token_validated = False
+                    st.session_state.token_error = True
+                    st.rerun()
+
         
-        if st.session_state.token_validated:
+        if st.session_state.get("token_error"):
+            st.error("❌ Invalid token")
+        
+        elif st.session_state.token_validated:
             st.success("🔓 Token Active")
+        
+        else:
+            st.info("🔑 Enter token and click Validate")
+
         
         st.markdown("---")
         
