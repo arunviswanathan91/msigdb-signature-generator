@@ -49,7 +49,6 @@ class DatabaseClient:
             st.error("Cannot connect to database server. Please check API URL.")
             st.stop()
     
-    
     def expand_signature_smart(
         self,
         seed_genes: List[str],
@@ -61,7 +60,7 @@ class DatabaseClient:
         """
         Smart signature expansion using probabilistic networks
         
-        This is the MAIN method - all the heavy computation happens on the server!
+        FIXED: Sends gene list as body, parameters as query params
         """
         # Build query parameters
         params = {
@@ -71,10 +70,10 @@ class DatabaseClient:
             'min_gene_prob': min_gene_prob
         }
         
-        # Send genes as a LIST in the body (not wrapped in object!)
+        # Send genes as LIST in body, params as query string
         response = self.session.post(
             f"{self.api_url}/api/expand-signature",
-            json=seed_genes,  # ← JUST THE LIST, NOT A DICT!
+            json=seed_genes,  # ← JUST THE LIST
             params=params,    # ← Other params as query params
             timeout=30
         )
