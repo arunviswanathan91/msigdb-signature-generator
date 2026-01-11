@@ -130,7 +130,7 @@ def inject_material_design_3():
     /* Buttons - M3 Filled Button */
     .stButton button {
         background: var(--md-sys-color-primary) !important;
-        color: var(--md-sys-color-on-primary) !important;
+        color: #0A0F13 !important;  /* Dark text for better contrast */
         border: none !important;
         border-radius: var(--md-sys-shape-corner-large) !important;
         padding: 10px 24px !important;
