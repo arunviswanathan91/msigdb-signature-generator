@@ -128,27 +128,41 @@ def inject_material_design_3():
     }
     
     /* Buttons - M3 Filled Button */
-    .stButton button {
+    .stButton > button,
+    .stButton button,
+    button[kind="primary"],
+    button[kind="secondary"] {
         background: var(--md-sys-color-primary) !important;
-        color: #0A0F13 !important;  /* Dark text for better contrast */
+        color: #000000 !important;  /* Pure black for maximum contrast */
         border: none !important;
         border-radius: var(--md-sys-shape-corner-large) !important;
         padding: 10px 24px !important;
         font-size: 14px !important;
-        font-weight: 500 !important;
+        font-weight: 600 !important;  /* Increased weight for better visibility */
         letter-spacing: 0.1px !important;
         text-transform: none !important;
         box-shadow: var(--md-sys-elevation-1) !important;
         transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
     }
     
+    .stButton > button:hover,
     .stButton button:hover {
         box-shadow: var(--md-sys-elevation-2) !important;
         background: color-mix(in srgb, var(--md-sys-color-primary) 90%, white) !important;
+        color: #000000 !important;
     }
     
+    .stButton > button:active,
     .stButton button:active {
         box-shadow: var(--md-sys-elevation-1) !important;
+        color: #000000 !important;
+    }
+    
+    /* Force text color in button children */
+    .stButton button p,
+    .stButton button span,
+    .stButton button div {
+        color: #000000 !important;
     }
     
     /* Text Input - M3 Filled Text Field */
