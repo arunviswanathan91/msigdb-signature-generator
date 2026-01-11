@@ -29,6 +29,7 @@ import numpy as np
 from dataclasses import dataclass, field
 from collections import Counter, defaultdict
 import hashlib
+import pickle
 
 # ============================================================
 # DATA CLASSES
@@ -95,91 +96,47 @@ class LayerTiming:
 
 
 # ============================================================
-# PERFORMANCE-OPTIMIZED CACHING FUNCTIONS
+# PRECOMPUTED LOADERS (NO COMPUTATION ALLOWED)
 # ============================================================
 
-@st.cache_data(show_spinner=False, ttl=None)
-def compute_pathway_embeddings_cached(_model, pathways_dict: Dict[str, List[str]]) -> Dict[str, np.ndarray]:
-    """
-    Precompute and cache embeddings for ALL pathways.
-    This is the CRITICAL optimization for Layer 2 performance.
-    
-    Args:
-        _model: Sentence transformer (underscore prevents hashing)
-        pathways_dict: All pathways from KB
-        
-    Returns:
-        Dict mapping pathway_id -> normalized embedding vector
-    """
-    embeddings = {}
-    
-    total = len(pathways_dict)
-    st.info(f"⚡ Computing embeddings for {total:,} pathways (one-time operation)...")
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    batch_size = 1000
-    pathway_items = list(pathways_dict.items())
-    
-    for i in range(0, len(pathway_items), batch_size):
-        batch = pathway_items[i:i+batch_size]
-        
-        for pid, genes in batch:
-            # Create pathway text
-            text = f"{pid.replace('_', ' ')} {' '.join(genes[:10])}"
-            
-            # Encode
-            emb = _model.encode(text, convert_to_numpy=True)
-            
-            # ⚡ OPTIMIZATION: Normalize once
-            emb = emb / (np.linalg.norm(emb) + 1e-8)
-            
-            embeddings[pid] = emb
-        
-        # Update progress
-        progress = min(1.0, (i + len(batch)) / total)
-        progress_bar.progress(progress)
-        status_text.text(f"   Processed {i + len(batch):,} / {total:,} pathways...")
-    
-    progress_bar.progress(1.0)
-    status_text.success(f"✅ All {total:,} embeddings computed and cached!")
-    time.sleep(1)
-    
-    return embeddings
+@st.cache_data(show_spinner=False)
+def load_precomputed_embeddings_or_fail(path="data/pathway_embeddings.pkl"):
+    if not os.path.exists(path):
+        st.error(f"❌ Precomputed embeddings file not found: {path}")
+        st.stop()
+
+    try:
+        with open(path, "rb") as f:
+            package = pickle.load(f)
+    except Exception as e:
+        st.error(f"❌ Failed to load embeddings pickle: {e}")
+        st.stop()
+
+    if "embeddings" not in package:
+        st.error("❌ Invalid embeddings file: missing 'embeddings' key")
+        st.stop()
+
+    return package["embeddings"]
 
 
 @st.cache_data(show_spinner=False)
-def build_dam_index_cached(pathways_dict: Dict[str, List[str]]) -> Tuple[Dict[str, Set[str]], Dict[Tuple[str, str], int]]:
-    """
-    Precompute DAM index for fast expansion.
-    
-    Returns:
-        - gene_to_pathways: Gene → Set of pathway IDs
-        - gene_cooccurrence: (gene1, gene2) → co-occurrence count
-    """
-    st.info("🔬 Building DAM index (one-time)...")
-    
-    # Build inverted index
-    gene_to_pathways = defaultdict(set)
-    
-    for pid, genes in pathways_dict.items():
-        for gene in genes:
-            gene_to_pathways[gene].add(pid)
-    
-    # Build co-occurrence matrix
-    gene_cooccurrence = defaultdict(int)
-    
-    for pid, genes in pathways_dict.items():
-        # All pairs in this pathway
-        for i, g1 in enumerate(genes):
-            for g2 in genes[i+1:]:
-                pair = tuple(sorted([g1, g2]))
-                gene_cooccurrence[pair] += 1
-    
-    st.success(f"✅ DAM index built: {len(gene_to_pathways):,} genes indexed")
-    
-    return dict(gene_to_pathways), dict(gene_cooccurrence)
+def load_precomputed_dam_or_fail(path="data/dam_index_light.pkl"):
+    if not os.path.exists(path):
+        st.error(f"❌ Precomputed DAM file not found: {path}")
+        st.stop()
 
+    try:
+        with open(path, "rb") as f:
+            package = pickle.load(f)
+    except Exception as e:
+        st.error(f"❌ Failed to load DAM pickle: {e}")
+        st.stop()
+
+    if "gene_to_pathways" not in package or "gene_cooccurrence" not in package:
+        st.error("❌ Invalid DAM file: missing required keys")
+        st.stop()
+
+    return package["gene_to_pathways"], package["gene_cooccurrence"]
 
 # ============================================================
 # SIGNATURE BUILDER - OPTIMIZED
@@ -1061,14 +1018,17 @@ def render_layer2_semantic_optimized(query, min_genes, max_genes):
                 st.error("Cannot load model")
                 return
             
-            # ⚡ CRITICAL OPTIMIZATION: Precompute embeddings
-            status.info("⚡ Computing pathway embeddings (one-time)...")
+
+
+            status.info("📂 Loading precomputed pathway embeddings...")
             progress_bar.progress(15)
             
-            pathway_embeddings = compute_pathway_embeddings_cached(
-                embedding_model,
-                pathways_dict
+            pathway_embeddings = load_precomputed_embeddings_or_fail(
+                "data/pathway_embeddings.pkl"
             )
+            
+            status.success(f"✅ Loaded {len(pathway_embeddings):,} pathway embeddings")
+
             
             progress_bar.progress(40)
             status.info("🧬 Building signatures...")
@@ -1205,9 +1165,14 @@ def render_layer3_dam_optimized():
             
             # Build index (cached)
             status = st.empty()
-            status.info("🔬 Building DAM index...")
+            status.info("📂 Loading precomputed DAM index...")
             
-            gene_to_pathways, gene_cooccurrence = build_dam_index_cached(pathways_dict)
+            gene_to_pathways, gene_cooccurrence = load_precomputed_dam_or_fail(
+                "data/dam_index_light.pkl"
+            )
+            
+            status.success(f"✅ DAM index loaded ({len(gene_to_pathways):,} genes)")
+
             
             # Expand signatures
             builder = SignatureBuilder()
