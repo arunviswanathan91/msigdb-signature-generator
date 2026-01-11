@@ -34,7 +34,18 @@ from collections import Counter, defaultdict
 import hashlib
 import pickle
 from db_client import DatabaseClient
-from material_design_3_components import inject_material_design_3
+from material_design_3_components import (
+    inject_material_design_3,
+    material_button,
+    material_slider,
+    material_text_field,
+    material_select,
+    material_checkbox,
+    material_multiselect,
+    material_card,
+    material_chip,
+    material_snackbar
+)
 
 # ============================================================
 # DATA CLASSES
@@ -637,14 +648,14 @@ def render_sidebar():
         with st.expander("🔑 HuggingFace Token", expanded=not st.session_state.token_validated):
             st.caption("One token for both LLMs")
             
-            token_input = st.text_input(
+            token_input = material_text_field(
                 "HF Token",
                 type="password",
                 value=st.session_state.hf_token or "",
                 help="Get at huggingface.co/settings/tokens"
             )
             
-            if st.button("Validate Token"):
+            if material_button("Validate Token"):
                 try:
                     from huggingface_hub import InferenceClient
                     InferenceClient(token=token_input)
@@ -791,7 +802,7 @@ def render_layer1_granularity(query, target_count, min_genes, max_genes):
     </div>
     """, unsafe_allow_html=True)
     
-    granularity_level = st.slider(
+    granularity_level = material_slider(
         "Number of mechanisms:",
         min_value=3,
         max_value=60,
@@ -804,7 +815,7 @@ def render_layer1_granularity(query, target_count, min_genes, max_genes):
     col1, col2 = st.columns(2)
     
     with col1:
-        if st.button("🎯 Generate Mechanisms", type="primary", use_container_width=True):
+        if material_button("🎯 Generate Mechanisms", type="primary", use_container_width=True):
             if not query or not query.strip():
                 st.error("Please enter a query")
                 return
@@ -833,7 +844,7 @@ def render_layer1_granularity(query, target_count, min_genes, max_genes):
     
     with col2:
         if st.session_state.decomposition_result:
-            if st.button("🔄 Regenerate", use_container_width=True):
+            if material_button("🔄 Regenerate", use_container_width=True):
                 st.session_state.decomposition_result = None
                 st.session_state.granularity_approved = False
                 st.rerun()
@@ -856,7 +867,7 @@ def render_layer1_granularity(query, target_count, min_genes, max_genes):
             with col1:
                 is_selected = facet['facet_id'] in st.session_state.selected_mechanism_ids
                 
-                if st.checkbox(
+                if material_checkbox(
                     "",
                     value=is_selected,
                     key=f"checkbox_{facet['facet_id']}",
@@ -887,7 +898,7 @@ def render_layer1_granularity(query, target_count, min_genes, max_genes):
         col1, col2 = st.columns(2)
         
         with col1:
-            if st.button("✅ Approve Selected & Continue", type="primary", use_container_width=True):
+            if material_button("✅ Approve Selected & Continue", type="primary", use_container_width=True):
                 if selected_count == 0:
                     st.error("Please select at least 1 mechanism")
                 else:
@@ -898,7 +909,7 @@ def render_layer1_granularity(query, target_count, min_genes, max_genes):
                     st.rerun()
         
         with col2:
-            if st.button("❌ Reject All", use_container_width=True):
+            if material_button("❌ Reject All", use_container_width=True):
                 st.session_state.decomposition_result = None
                 st.session_state.granularity_approved = False
                 st.rerun()
@@ -925,7 +936,7 @@ def render_layer2_semantic_fixed(query, target_count, min_genes, max_genes):
     </div>
     """, unsafe_allow_html=True)
     
-    if st.button("🚀 Build Semantic Signatures", type="primary", use_container_width=True):
+    if material_button("🚀 Build Semantic Signatures", type="primary", use_container_width=True):
         
         timing = LayerTiming("Layer 2: Semantic Building", time.time())
         
@@ -1094,21 +1105,21 @@ def render_layer3_dam_remote():
     </div>
     """, unsafe_allow_html=True)
     
-    enable_dam = st.checkbox("🔬 Enable DAM Expansion", value=False)
+    enable_dam = material_checkbox("🔬 Enable DAM Expansion", value=False)
     
     if enable_dam:
         col1, col2 = st.columns(2)
         
         with col1:
-            expansion_strength = st.slider("Strength", 0.1, 1.0, 0.5, 0.1)
+            expansion_strength = material_slider("Strength", 0.1, 1.0, 0.5, 0.1)
         
         with col2:
-            max_neighbors = st.slider("Max neighbors", 1, 10, 5, 1)
+            max_neighbors = material_slider("Max neighbors", 1, 10, 5, 1)
         
         # API URL
         api_url = "https://arunviswanathan91-msigdb-api.hf.space"
         
-        if st.button("🔬 Expand with DAM", type="primary", use_container_width=True):
+        if material_button("🔬 Expand with DAM", type="primary", use_container_width=True):
             
             timing = LayerTiming("Layer 3: DAM Expansion", time.time())
             
@@ -1196,20 +1207,20 @@ def render_layer4_verification_fixed(query):
     
     if verification_mode != "None":
         
-        llm2_model = st.selectbox(
+        llm2_model = material_select(
             "Model:",
             ["stanford-crfm/BioMedLM", "microsoft/BioGPT-Large"]
         )
         
-        context_options = st.multiselect(
+        context_options = material_multiselect(
             "Context:",
             ["Original query context", "Pathway sources used", "Mechanism description", "All of the above"],
             default=["All of the above"]
         )
         
-        batch_size = st.slider("Batch size:", 1, 10, 5, 1, help="Signatures per API call")
+        batch_size = material_slider("Batch size:", 1, 10, 5, 1, help="Signatures per API call")
         
-        if st.button("🧬 Run Verification", type="primary", use_container_width=True):
+        if material_button("🧬 Run Verification", type="primary", use_container_width=True):
             
             timing = LayerTiming("Layer 4: LLM Verification", time.time())
             
@@ -1328,7 +1339,7 @@ def render_layer5_approval_text_based():
                             label = f"~~{gene}~~"
                             button_type = "secondary"
                         
-                        if st.button(label, key=button_key, use_container_width=True, type=button_type):
+                        if material_button(label, key=button_key, use_container_width=True, type=button_type):
                             # Toggle selection
                             if gene in selected_genes:
                                 selected_genes.remove(gene)
@@ -1349,7 +1360,7 @@ def render_layer5_approval_text_based():
                 for col_idx, gene in enumerate(sig_suggestions['genes_to_add']):
                     with suggested_cols[col_idx]:
                         add_key = f"add_{sig.signature_id}_{gene}"
-                        if st.button(f"➕ {gene}", key=add_key, use_container_width=True):
+                        if material_button(f"➕ {gene}", key=add_key, use_container_width=True):
                             selected_genes.add(gene)
                             st.rerun()
             
@@ -1357,7 +1368,7 @@ def render_layer5_approval_text_based():
             col1, col2 = st.columns(2)
             
             with col1:
-                if st.button("✅ Approve", key=f"approve_{sig.signature_id}", use_container_width=True):
+                if material_button("✅ Approve", key=f"approve_{sig.signature_id}", use_container_width=True):
                     
                     # Update signature with selected genes
                     sig.genes = list(selected_genes)
@@ -1373,7 +1384,7 @@ def render_layer5_approval_text_based():
                     st.success(f"✅ Approved with {len(selected_genes)} genes")
             
             with col2:
-                if st.button("❌ Reject", key=f"reject_{sig.signature_id}", use_container_width=True):
+                if material_button("❌ Reject", key=f"reject_{sig.signature_id}", use_container_width=True):
                     # Remove from approved list
                     if sig.signature_id in st.session_state.final_approved_signature_ids:
                         st.session_state.final_approved_signature_ids.remove(sig.signature_id)
