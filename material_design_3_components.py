@@ -318,7 +318,7 @@ def inject_material_design_3():
     """, unsafe_allow_html=True)
 
 
-def material_slider(label, min_value=0, max_value=100, value=50, step=1, key=None, help_text=None, disabled=False, format=None):
+def material_slider(label, min_value=0, max_value=100, value=50, key=None, help_text=None):
     """
     Material Design 3 Slider with custom styling
     Returns the slider value
@@ -329,47 +329,30 @@ def material_slider(label, min_value=0, max_value=100, value=50, step=1, key=Non
         min_value=min_value,
         max_value=max_value,
         value=value,
-        step=step,
         key=key,
-        help=help_text,
-        disabled=disabled,
-        format=format
+        help=help_text
     )
 
 
-def material_button(label, key=None, on_click=None, type="primary", use_container_width=False, disabled=False, help=None):
+def material_button(label, key=None, on_click=None, type="primary"):
     """
     Material Design 3 Button
     Returns True if clicked
     """
-    return st.button(
-        label, 
-        key=key, 
-        on_click=on_click, 
-        type=type,
-        use_container_width=use_container_width,
-        disabled=disabled,
-        help=help
-    )
+    return st.button(label, key=key, on_click=on_click)
 
 
-def material_text_field(label, value="", key=None, placeholder="", help_text=None, type="default", max_chars=None, disabled=False):
+def material_text_field(label, value="", key=None, placeholder="", help_text=None):
     """
     Material Design 3 Filled Text Field
     Returns the text value
-    
-    Args:
-        type: "default" or "password"
     """
     return st.text_input(
         label=label,
         value=value,
         key=key,
         placeholder=placeholder,
-        help=help_text,
-        type=type,
-        max_chars=max_chars,
-        disabled=disabled
+        help=help_text
     )
 
 
@@ -378,11 +361,6 @@ def material_select(label, options, index=0, key=None, help_text=None):
     Material Design 3 Filled Dropdown
     Returns the selected value
     """
-    # Auto-generate unique key if not provided to avoid duplicate widget errors
-    if key is None:
-        import hashlib
-        key = "select_" + hashlib.md5(f"{label}{str(options)}".encode()).hexdigest()[:8]
-    
     return st.selectbox(
         label=label,
         options=options,
@@ -390,53 +368,6 @@ def material_select(label, options, index=0, key=None, help_text=None):
         key=key,
         help=help_text
     )
-
-
-def material_checkbox(label, value=False, key=None, help_text=None, disabled=False, label_visibility="visible"):
-    """
-    Material Design 3 Checkbox
-    Returns the checkbox state
-    """
-    # Auto-generate unique key if not provided
-    if key is None:
-        import hashlib
-        key = "checkbox_" + hashlib.md5(f"{label}{str(value)}".encode()).hexdigest()[:8]
-    
-    return st.checkbox(
-        label=label,
-        value=value,
-        key=key,
-        help=help_text,
-        disabled=disabled,
-        label_visibility=label_visibility
-    )
-
-
-def material_multiselect(label, options, default=None, key=None, help_text=None, disabled=False, format_func=None, max_selections=None):
-    """
-    Material Design 3 Multi-Select
-    Returns the selected values
-    """
-    # Auto-generate unique key if not provided
-    if key is None:
-        import hashlib
-        key = "multiselect_" + hashlib.md5(f"{label}{str(options)}".encode()).hexdigest()[:8]
-    
-    kwargs = {
-        'label': label,
-        'options': options,
-        'default': default,
-        'key': key,
-        'help': help_text,
-        'disabled': disabled
-    }
-    
-    if format_func is not None:
-        kwargs['format_func'] = format_func
-    if max_selections is not None:
-        kwargs['max_selections'] = max_selections
-    
-    return st.multiselect(**kwargs)
 
 
 def material_card(content, elevation=1):
