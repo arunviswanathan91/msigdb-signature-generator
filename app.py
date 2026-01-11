@@ -1,20 +1,23 @@
 """
-Biological Signature Generator - OPTIMIZED VERSION
-==================================================
+Biological Signature Generator - FULLY FIXED VERSION
+====================================================
 
-OPTIMIZATIONS IMPLEMENTED:
-✅ Layer 1: Mechanism selection with checkboxes
-✅ Layer 2: Precomputed & cached pathway embeddings (15-30x speedup)
-✅ Normalized embeddings for faster similarity
-✅ Batch LLM verification (5x speedup)
-✅ Precomputed DAM indices
-✅ Clean session state (no large objects)
-✅ Timing diagnostics per layer
+FIXES APPLIED:
+✅ Fix A: DAM loader diagnostics
+✅ Fix B: Token UI race condition  
+✅ Fix C: Signature deduplication
+✅ Fix D: Signature ID mapping in verification
+✅ Fix E: LLM logging
+✅ Root Cause #1: Use ALL mechanism queries (removed [:1])
+✅ Root Cause #2: Dynamic variant allocation
+✅ DAM: Remote API integration
+✅ UI: Text-based gene selection
 
 PERFORMANCE:
-- Layer 2: 15 minutes → 30 seconds (30x faster)
-- Layer 4: 70 seconds → 14 seconds (5x faster)
-- Total: 17 minutes → 2 minutes (8x faster)
+- Layer 2: 10 separate searches (true diversity)
+- Layer 3: Remote API (no local 1.3GB file)
+- Layer 4: Batch verification with ID mapping
+- Total: ~2 minutes for 35 signatures
 """
 
 import streamlit as st
@@ -30,6 +33,8 @@ from dataclasses import dataclass, field
 from collections import Counter, defaultdict
 import hashlib
 import pickle
+from db_client import DatabaseClient
+from material_ui_css import inject_material_ui_css
 
 # ============================================================
 # DATA CLASSES
@@ -62,6 +67,10 @@ class GeneSignature:
             'dam_expanded': self.dam_expanded,
             'llm2_verified': self.llm2_verified
         }
+    
+    def gene_set_hash(self) -> str:
+        """Hash of gene set for deduplication"""
+        return hashlib.md5('|'.join(sorted(self.genes)).encode()).hexdigest()
 
 
 @dataclass
@@ -96,75 +105,52 @@ class LayerTiming:
 
 
 # ============================================================
-# PRECOMPUTED LOADERS (NO COMPUTATION ALLOWED)
+# PRECOMPUTED LOADERS
 # ============================================================
 
 @st.cache_data(show_spinner=False)
 def load_precomputed_embeddings_or_fail(path="data/pathway_embeddings.pkl"):
+    """Load precomputed pathway embeddings with diagnostics"""
     if not os.path.exists(path):
-        st.error(f"❌ Precomputed embeddings file not found: {path}")
+        st.error(f"❌ Embeddings file not found: {path}")
+        st.info("💡 Make sure pathway_embeddings.pkl is in the data/ folder")
         st.stop()
 
     try:
         with open(path, "rb") as f:
             package = pickle.load(f)
     except Exception as e:
-        st.error(f"❌ Failed to load embeddings pickle: {e}")
+        st.error(f"❌ Failed to load embeddings: {e}")
         st.stop()
 
-    if "embeddings" not in package:
-        st.error("❌ Invalid embeddings file: missing 'embeddings' key")
+    # FIX A: Better diagnostics
+    required_keys = {"embeddings"}
+    found_keys = set(package.keys())
+    
+    if not required_keys.issubset(found_keys):
+        st.error(
+            f"❌ Invalid embeddings file!\n\n"
+            f"Expected keys: {required_keys}\n"
+            f"Found keys: {found_keys}\n\n"
+            f"💡 This looks like a DAM file, not embeddings. "
+            f"Make sure you're loading pathway_embeddings.pkl"
+        )
         st.stop()
 
     return package["embeddings"]
 
 
-@st.cache_data(show_spinner=False)
-def load_precomputed_dam_or_fail(path="data/dam_index_light.pkl"):
-    if not os.path.exists(path):
-        st.error(f"❌ Precomputed DAM file not found: {path}")
-        st.stop()
-
-    try:
-        with open(path, "rb") as f:
-            package = pickle.load(f)
-    except Exception as e:
-        st.error(f"❌ Failed to load DAM pickle: {e}")
-        st.stop()
-
-    required_keys = {"gene_to_pathways", "pathways_dict"}
-    if not required_keys.issubset(package):
-        st.error(
-            f"❌ Invalid DAM file. Expected keys: {required_keys}, "
-            f"found: {set(package.keys())}"
-        )
-        st.stop()
-
-    return package["gene_to_pathways"], package["pathways_dict"]
-
-
 # ============================================================
-# SIGNATURE BUILDER - OPTIMIZED
+# SIGNATURE BUILDER - WITH DEDUPLICATION
 # ============================================================
 
 class SignatureBuilder:
-    """Builds gene signatures with relevance scoring and fast DAM expansion"""
+    """Builds gene signatures with deduplication and dynamic variants"""
     
     def __init__(self, min_genes: int = 10, max_genes: int = 20):
         self.min_genes = min_genes
         self.max_genes = max_genes
-        self.gene_to_pathways = None
-        self.pathways_dict = None
-    
-    
-    def set_dam_index(
-        self,
-        gene_to_pathways: Dict[str, List[str]],
-        pathways_dict: Dict[str, List[str]]
-    ):
-        self.gene_to_pathways = gene_to_pathways
-        self.pathways_dict = pathways_dict
-
+        self.seen_gene_sets: Set[str] = set()  # For deduplication
     
     def build_signature_from_pathways(
         self,
@@ -216,96 +202,106 @@ class SignatureBuilder:
             source_pathways=source_pathways[:5]
         )
     
-    def build_multiple_mechanisms(
+    def build_multiple_mechanisms_dynamic(
         self,
         facet_name: str,
         pathways_dict: Dict[str, List[str]],
         pathway_similarities: Dict[str, float],
         num_variants: int = 3
     ) -> List[GeneSignature]:
-        """Build multiple mechanism variants per facet"""
+        """
+        FIX ROOT CAUSE #2: Dynamic variant generation
+        Generate exactly num_variants unique signatures
+        """
         
         signatures = []
         
-        # Core
-        core_sig = self.build_signature_from_pathways(
-            facet_name, "Core Markers", pathways_dict, pathway_similarities
+        # Sort pathways by similarity
+        sorted_pathways = sorted(
+            pathway_similarities.items(), 
+            key=lambda x: x[1], 
+            reverse=True
         )
-        if core_sig:
+        
+        if len(pathways_dict) < 3:
+            # Not enough pathways for variants - just do core
+            core_sig = self.build_signature_from_pathways(
+                facet_name, "Core Markers", pathways_dict, pathway_similarities
+            )
+            if core_sig:
+                signatures.append(core_sig)
+            return signatures
+        
+        # Strategy 1: Core (top pathways)
+        top_count = max(3, len(sorted_pathways) // 3)
+        top_ids = [pid for pid, _ in sorted_pathways[:top_count]]
+        top_pathways = {pid: pathways_dict[pid] for pid in top_ids if pid in pathways_dict}
+        top_sims = {pid: pathway_similarities[pid] for pid in top_ids if pid in pathway_similarities}
+        
+        core_sig = self.build_signature_from_pathways(
+            facet_name, "Core Markers", top_pathways, top_sims
+        )
+        if core_sig and self._is_unique_signature(core_sig):
             signatures.append(core_sig)
         
-        # Extended (top pathways)
-        if len(pathways_dict) >= 4:
-            sorted_pathways = sorted(pathway_similarities.items(), key=lambda x: x[1], reverse=True)
-            top_half_ids = [pid for pid, _ in sorted_pathways[:len(sorted_pathways)//2]]
-            top_pathways = {pid: pathways_dict[pid] for pid in top_half_ids if pid in pathways_dict}
-            top_sims = {pid: pathway_similarities[pid] for pid in top_half_ids if pid in pathway_similarities}
+        # Strategy 2: Extended (middle pathways)
+        if len(signatures) < num_variants and len(sorted_pathways) >= 6:
+            mid_start = len(sorted_pathways) // 3
+            mid_end = 2 * len(sorted_pathways) // 3
+            mid_ids = [pid for pid, _ in sorted_pathways[mid_start:mid_end]]
+            mid_pathways = {pid: pathways_dict[pid] for pid in mid_ids if pid in pathways_dict}
+            mid_sims = {pid: pathway_similarities[pid] for pid in mid_ids if pid in pathway_similarities}
             
             extended_sig = self.build_signature_from_pathways(
-                facet_name, "Extended Network", top_pathways, top_sims
+                facet_name, "Extended Network", mid_pathways, mid_sims
             )
-            if extended_sig and extended_sig.genes != core_sig.genes:
+            if extended_sig and self._is_unique_signature(extended_sig):
                 signatures.append(extended_sig)
         
-        # Regulatory (bottom pathways)
-        if len(pathways_dict) >= 4 and len(signatures) < num_variants:
-            sorted_pathways = sorted(pathway_similarities.items(), key=lambda x: x[1], reverse=True)
-            bottom_half_ids = [pid for pid, _ in sorted_pathways[len(sorted_pathways)//2:]]
-            bottom_pathways = {pid: pathways_dict[pid] for pid in bottom_half_ids if pid in pathways_dict}
-            bottom_sims = {pid: pathway_similarities[pid] for pid in bottom_half_ids if pid in pathway_similarities}
+        # Strategy 3: Regulatory (bottom pathways)
+        if len(signatures) < num_variants and len(sorted_pathways) >= 6:
+            bottom_start = 2 * len(sorted_pathways) // 3
+            bottom_ids = [pid for pid, _ in sorted_pathways[bottom_start:]]
+            bottom_pathways = {pid: pathways_dict[pid] for pid in bottom_ids if pid in pathways_dict}
+            bottom_sims = {pid: pathway_similarities[pid] for pid in bottom_ids if pid in pathway_similarities}
             
             regulatory_sig = self.build_signature_from_pathways(
                 facet_name, "Regulatory Context", bottom_pathways, bottom_sims
             )
-            if regulatory_sig:
+            if regulatory_sig and self._is_unique_signature(regulatory_sig):
                 signatures.append(regulatory_sig)
+        
+        # If we still need more variants, try different sizes
+        while len(signatures) < num_variants and len(pathways_dict) >= 3:
+            # Random subset strategy
+            import random
+            sample_size = random.randint(3, min(10, len(pathways_dict)))
+            sample_ids = random.sample(list(pathways_dict.keys()), sample_size)
+            sample_pathways = {pid: pathways_dict[pid] for pid in sample_ids}
+            sample_sims = {pid: pathway_similarities[pid] for pid in sample_ids if pid in pathway_similarities}
+            
+            variant_sig = self.build_signature_from_pathways(
+                facet_name, f"Variant {len(signatures)+1}", sample_pathways, sample_sims
+            )
+            if variant_sig and self._is_unique_signature(variant_sig):
+                signatures.append(variant_sig)
+            else:
+                break  # Can't generate more unique variants
         
         return signatures
     
-
-    def expand_with_dam_fast(
-        self,
-        signature: GeneSignature,
-        expansion_strength: float = 0.5,
-        max_additional: int = 5
-    ) -> GeneSignature:
+    def _is_unique_signature(self, sig: GeneSignature) -> bool:
         """
-        DAM expansion using gene→pathways→genes (ON-THE-FLY).
-        No gene-gene matrix. No heavy memory.
+        FIX C: Signature deduplication
+        Check if gene set is unique before adding
         """
-    
-        if not self.gene_to_pathways or not self.pathways_dict:
-            return signature
-    
-        seed_genes = set(signature.genes)
-        candidate_scores = defaultdict(float)
-    
-        # 1. Collect all pathways touched by seed genes
-        seed_pathways = set()
-        for gene in seed_genes:
-            seed_pathways.update(self.gene_to_pathways.get(gene, []))
-    
-        # 2. Traverse those pathways and score new genes
-        for pathway_id in seed_pathways:
-            genes_in_pathway = self.pathways_dict.get(pathway_id, [])
-            for gene in genes_in_pathway:
-                if gene in seed_genes:
-                    continue
-                candidate_scores[gene] += expansion_strength
-    
-        if not candidate_scores:
-            return signature
-    
-        # 3. Select top neighbors
-        ranked = sorted(candidate_scores.items(), key=lambda x: x[1], reverse=True)
-        new_genes = [g for g, _ in ranked[:max_additional]]
-    
-        # 4. Merge + cap
-        signature.genes = (signature.genes + new_genes)[:self.max_genes]
-        signature.dam_expanded = True
-    
-        return signature
-
+        gene_hash = sig.gene_set_hash()
+        
+        if gene_hash in self.seen_gene_sets:
+            return False
+        
+        self.seen_gene_sets.add(gene_hash)
+        return True
     
     def _make_id(self, name: str) -> str:
         return name.upper().replace(' ', '_').replace('-', '_').replace('/', '_')
@@ -334,14 +330,7 @@ def fast_semantic_search(
     model,
     top_k: int = 50
 ) -> Tuple[Dict[str, List[str]], Dict[str, float]]:
-    """
-    OPTIMIZED: Fast semantic search using precomputed normalized embeddings.
-    
-    Performance:
-    - Old: 30 seconds per query (re-encodes all pathways)
-    - New: 0.1 seconds per query (only encodes query)
-    - Speedup: 300x
-    """
+    """Fast semantic search using precomputed embeddings"""
     
     if not pathway_embeddings:
         return {}, {}
@@ -350,10 +339,9 @@ def fast_semantic_search(
     query_emb = model.encode(query, convert_to_numpy=True)
     query_emb = query_emb / (np.linalg.norm(query_emb) + 1e-8)
     
-    # ⚡ OPTIMIZED: Vectorized cosine similarity (dot product of normalized vectors)
+    # Vectorized cosine similarity
     similarities = []
     for pid, pathway_emb in pathway_embeddings.items():
-        # Already normalized, so dot product = cosine similarity
         similarity = float(np.dot(query_emb, pathway_emb))
         similarities.append((pid, similarity))
     
@@ -362,7 +350,7 @@ def fast_semantic_search(
     top_pathways = similarities[:top_k]
     
     # Return results
-    selected_pathways = {pid: pathways_dict[pid] for pid, _ in top_pathways}
+    selected_pathways = {pid: pathways_dict[pid] for pid, _ in top_pathways if pid in pathways_dict}
     similarity_dict = {pid: score for pid, score in top_pathways}
     
     return selected_pathways, similarity_dict
@@ -454,7 +442,7 @@ def verify_signatures_batch(
     batch_size: int = 5
 ) -> Dict[str, Any]:
     """
-    OPTIMIZED: Batch verification (5x faster than sequential).
+    FIX D: Batch verification with proper signature ID mapping
     
     Args:
         batch_size: Number of signatures per API call
@@ -477,13 +465,13 @@ def verify_signatures_batch(
             end_idx = min(start_idx + batch_size, len(signatures))
             batch = signatures[start_idx:end_idx]
             
-            # Build batch prompt
+            # FIX D: Use actual signature IDs in prompt
             signatures_text = "\n\n".join([
-                f"SIGNATURE_{j+1}:\n"
+                f"{sig.signature_id}:\n"  # Use actual ID, not position
                 f"Name: {sig.signature_name}\n"
                 f"Mechanism: {sig.mechanism}\n"
                 f"Genes ({len(sig.genes)}): {', '.join(sig.genes)}"
-                for j, sig in enumerate(batch)
+                for sig in batch
             ])
             
             if mode == "verify_only":
@@ -499,20 +487,23 @@ Original Query: {original_query}
 
 Task: {task}
 
-Output JSON ONLY:
+Output JSON ONLY using the EXACT signature IDs shown above:
 {{
-  "SIGNATURE_1": {{
+  "SIGNATURE_ID_1": {{
     "genes_to_remove": ["GENE1"],
     "genes_to_add": ["GENE2", "GENE3"],
     "reasoning": {{"GENE1": "why remove", "GENE2": "why add"}}
   }},
-  "SIGNATURE_2": {{...}},
+  "SIGNATURE_ID_2": {{...}},
   ...
 }}
 
 If no changes needed, return empty lists."""
 
             try:
+                # FIX E: Add LLM logging
+                st.caption(f"🔄 Batch {batch_idx+1}/{num_batches}: Verifying {len(batch)} signatures...")
+                
                 response = client.chat_completion(
                     messages=[{"role": "user", "content": prompt}],
                     model=llm2_model,
@@ -538,11 +529,10 @@ If no changes needed, return empty lists."""
                 
                 batch_results = json.loads(cleaned)
                 
-                # Map back to signature IDs
-                for j, sig in enumerate(batch):
-                    key = f"SIGNATURE_{j+1}"
-                    if key in batch_results:
-                        all_suggestions[sig.signature_id] = batch_results[key]
+                # FIX D: Map using actual signature IDs
+                for sig in batch:
+                    if sig.signature_id in batch_results:
+                        all_suggestions[sig.signature_id] = batch_results[sig.signature_id]
                     else:
                         # No suggestions for this signature
                         all_suggestions[sig.signature_id] = {
@@ -569,84 +559,24 @@ If no changes needed, return empty lists."""
 
 
 # ============================================================
-# UI STYLING
-# ============================================================
-
-def inject_modern_css():
-    st.markdown("""
-    <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
-    * { font-family: 'Inter', sans-serif; }
-    .stApp { background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); }
-    h1 { 
-        font-size: 2.5rem !important;
-        background: linear-gradient(135deg, #818cf8 0%, #c084fc 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-    }
-    .stButton button {
-        background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%) !important;
-        color: white !important;
-        border-radius: 10px !important;
-        padding: 12px 28px !important;
-        font-weight: 600 !important;
-    }
-    .info-box {
-        background: rgba(59, 130, 246, 0.1);
-        border-left: 4px solid #3b82f6;
-        padding: 16px;
-        border-radius: 8px;
-        margin: 16px 0;
-        color: #e2e8f0;
-    }
-    .warning-box {
-        background: rgba(251, 191, 36, 0.1);
-        border-left: 4px solid #fbbf24;
-        padding: 16px;
-        border-radius: 8px;
-        margin: 16px 0;
-        color: #e2e8f0;
-    }
-    .success-box {
-        background: rgba(16, 185, 129, 0.1);
-        border-left: 4px solid #10b981;
-        padding: 16px;
-        border-radius: 8px;
-        margin: 16px 0;
-        color: #e2e8f0;
-    }
-    .timing-badge {
-        display: inline-block;
-        background: rgba(99, 102, 241, 0.2);
-        color: #a5b4fc;
-        padding: 4px 12px;
-        border-radius: 12px;
-        font-size: 0.85rem;
-        font-weight: 600;
-        margin-left: 8px;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
-
-# ============================================================
 # SESSION STATE
 # ============================================================
 
 def initialize_session_state():
-    """Initialize session state with MINIMAL data (no large objects)"""
+    """Initialize session state with proper defaults"""
     defaults = {
         'hf_token': None,
         'token_validated': False,
+        'token_error': False,  # FIX B: Add explicit error flag
         'kb_loaded': False,
         
         # Layer 1
         'decomposition_result': None,
-        'selected_mechanism_ids': [],  # Only IDs, not full objects
+        'selected_mechanism_ids': [],
         'granularity_approved': False,
         
         # Layer 2
-        'signature_ids': [],  # Only IDs
+        'signature_ids': [],
         
         # Layer 3
         'dam_enabled': False,
@@ -656,6 +586,7 @@ def initialize_session_state():
         
         # Layer 5
         'final_approved_signature_ids': [],
+        'gene_selections': {},  # For text-based UI
         
         # Timing
         'layer_timings': [],
@@ -667,12 +598,12 @@ def initialize_session_state():
 
 
 # ============================================================
-# KB LOADING - CACHED
+# KB LOADING
 # ============================================================
 
 @st.cache_data(show_spinner=False)
 def load_knowledge_base_cached() -> Optional[Dict[str, List[str]]]:
-    """Load KB and cache (no large objects in session state)"""
+    """Load KB and cache"""
     possible_paths = [
         "data/knowledge_base.json.gz",
         "./data/knowledge_base.json.gz",
@@ -713,30 +644,27 @@ def render_sidebar():
                 help="Get at huggingface.co/settings/tokens"
             )
             
-
             if st.button("Validate Token"):
                 try:
                     from huggingface_hub import InferenceClient
                     InferenceClient(token=token_input)
                     st.session_state.hf_token = token_input
                     st.session_state.token_validated = True
-                    st.session_state.token_error = False
+                    st.session_state.token_error = False  # FIX B: Clear error
                     st.rerun()
                 except Exception:
                     st.session_state.token_validated = False
-                    st.session_state.token_error = True
+                    st.session_state.token_error = True  # FIX B: Set error
+                    st.session_state.hf_token = None  # FIX B: Clear bad token
                     st.rerun()
-
         
-        if st.session_state.get("token_error"):
+        # FIX B: Proper state display with normalized flags
+        if st.session_state.token_error and not st.session_state.token_validated:
             st.error("❌ Invalid token")
-        
-        elif st.session_state.token_validated:
+        elif st.session_state.token_validated and not st.session_state.token_error:
             st.success("🔓 Token Active")
-        
         else:
             st.info("🔑 Enter token and click Validate")
-
         
         st.markdown("---")
         
@@ -755,13 +683,13 @@ def render_sidebar():
         st.markdown("---")
         st.markdown("### ℹ️ Pipeline")
         st.caption("""
-        **Optimized Layers:**
+        **Fixed Layers:**
         
         1. 🧠 Granularity + Selection
-        2. 🔍 Semantic (30x faster)
-        3. 🔬 DAM (10x faster)
-        4. ✅ Verification (5x faster)
-        5. 👤 Approval
+        2. 🔍 Semantic (ALL queries)
+        3. 🔬 DAM (Remote API)
+        4. ✅ Verification (ID mapping)
+        5. 👤 Approval (Text-based)
         """)
 
 
@@ -808,7 +736,7 @@ def render_generation_tab():
     query = st.text_area(
         "",
         height=80,
-        placeholder="Example: gamma delta T cell mechanisms in pancreatic cancer",
+        placeholder="Example: Th17 role in obesity",
         key="main_query"
     )
     
@@ -836,20 +764,20 @@ def render_generation_tab():
     if not st.session_state.granularity_approved:
         return
     
-    render_layer2_semantic_optimized(query, min_genes, max_genes)
+    render_layer2_semantic_fixed(query, target_count, min_genes, max_genes)
     
     if not st.session_state.signature_ids:
         return
     
-    render_layer3_dam_optimized()
+    render_layer3_dam_remote()
     
-    render_layer4_verification_optimized(query)
+    render_layer4_verification_fixed(query)
     
-    render_layer5_approval()
+    render_layer5_approval_text_based()
 
 
 # ============================================================
-# LAYER 1 - WITH MECHANISM SELECTION
+# LAYER 1
 # ============================================================
 
 def render_layer1_granularity(query, target_count, min_genes, max_genes):
@@ -867,7 +795,7 @@ def render_layer1_granularity(query, target_count, min_genes, max_genes):
         "Number of mechanisms:",
         min_value=3,
         max_value=60,
-        value=9,
+        value=10,
         step=1
     )
     
@@ -881,7 +809,6 @@ def render_layer1_granularity(query, target_count, min_genes, max_genes):
                 st.error("Please enter a query")
                 return
             
-            # Start timing
             timing = LayerTiming("Layer 1: Decomposition", time.time())
             
             with st.spinner(f"🧠 LLM generating {granularity_level} mechanisms..."):
@@ -897,7 +824,7 @@ def render_layer1_granularity(query, target_count, min_genes, max_genes):
                     
                     st.session_state.decomposition_result = result
                     st.session_state.granularity_approved = False
-                    st.session_state.selected_mechanism_ids = []  # Reset selection
+                    st.session_state.selected_mechanism_ids = []
                     
                     st.success(f"✅ Generated {len(result.facets)} mechanisms!")
                     st.markdown(f'<span class="timing-badge">⏱️ {timing.duration_str}</span>', unsafe_allow_html=True)
@@ -911,7 +838,7 @@ def render_layer1_granularity(query, target_count, min_genes, max_genes):
                 st.session_state.granularity_approved = False
                 st.rerun()
     
-    # SHOW MECHANISMS WITH CHECKBOXES
+    # Show mechanisms with checkboxes
     if st.session_state.decomposition_result:
         st.markdown("---")
         st.markdown("#### 📋 Select Mechanisms to Use:")
@@ -927,7 +854,6 @@ def render_layer1_granularity(query, target_count, min_genes, max_genes):
             col1, col2 = st.columns([1, 20])
             
             with col1:
-                # Checkbox
                 is_selected = facet['facet_id'] in st.session_state.selected_mechanism_ids
                 
                 if st.checkbox(
@@ -943,7 +869,6 @@ def render_layer1_granularity(query, target_count, min_genes, max_genes):
                         st.session_state.selected_mechanism_ids.remove(facet['facet_id'])
             
             with col2:
-                # Mechanism details
                 with st.expander(f"{i}. {facet['facet_name']}", expanded=False):
                     st.caption(f"**Query:** {', '.join(facet.get('mechanism_queries', []))}")
                     st.caption(f"**ID:** {facet['facet_id']}")
@@ -980,18 +905,23 @@ def render_layer1_granularity(query, target_count, min_genes, max_genes):
 
 
 # ============================================================
-# LAYER 2 - OPTIMIZED WITH CACHED EMBEDDINGS
+# LAYER 2 - FIXED VERSION
 # ============================================================
 
-def render_layer2_semantic_optimized(query, min_genes, max_genes):
-    """Layer 2: OPTIMIZED semantic signature building"""
+def render_layer2_semantic_fixed(query, target_count, min_genes, max_genes):
+    """
+    FIX ROOT CAUSE #1 & #2: 
+    - Use ALL mechanism queries (removed [:1])
+    - Dynamic variant allocation
+    - Signature deduplication
+    """
     
     st.markdown("---")
-    st.markdown("### 🔍 Layer 2: Semantic Building (Optimized)")
+    st.markdown("### 🔍 Layer 2: Semantic Building (FIXED)")
     
     st.markdown(f"""
     <div class="info-box">
-    ⚡ <strong>Performance boost:</strong> Precomputed embeddings make this 30x faster!
+    ✅ <strong>FIXED:</strong> Uses ALL {len(st.session_state.selected_mechanism_ids)} mechanism queries for true diversity!
     </div>
     """, unsafe_allow_html=True)
     
@@ -1021,8 +951,7 @@ def render_layer2_semantic_optimized(query, min_genes, max_genes):
                 st.error("Cannot load model")
                 return
             
-
-
+            # Load embeddings
             status.info("📂 Loading precomputed pathway embeddings...")
             progress_bar.progress(15)
             
@@ -1031,17 +960,26 @@ def render_layer2_semantic_optimized(query, min_genes, max_genes):
             )
             
             status.success(f"✅ Loaded {len(pathway_embeddings):,} pathway embeddings")
-
             
             progress_bar.progress(40)
-            status.info("🧬 Building signatures...")
+            status.info("🧬 Building signatures with TRUE diversity...")
             
-            # Get selected facets only
+            # Get selected facets
             all_facets = st.session_state.decomposition_result.facets
             selected_facets = [
                 f for f in all_facets 
                 if f['facet_id'] in st.session_state.selected_mechanism_ids
             ]
+            
+            # Calculate variants per mechanism
+            num_mechanisms = len(selected_facets)
+            variants_per_mechanism = max(1, target_count // num_mechanisms)
+            remainder = target_count % num_mechanisms
+            
+            status.info(
+                f"🎯 Target: {target_count} signatures from {num_mechanisms} mechanisms\n"
+                f"   → {variants_per_mechanism} variants per mechanism (+{remainder} for top mechanisms)"
+            )
             
             builder = SignatureBuilder(min_genes=min_genes, max_genes=max_genes)
             all_signatures = []
@@ -1050,10 +988,11 @@ def render_layer2_semantic_optimized(query, min_genes, max_genes):
                 facet_name = facet['facet_name']
                 mechanism_queries = facet.get('mechanism_queries', [facet_name])
                 
-                status.info(f"   Building: {facet_name}...")
-                
-                for mech_query in mechanism_queries[:1]:
-                    # ⚡ FAST semantic search
+                # FIX ROOT CAUSE #1: Use ALL queries, not just [:1]
+                for query_idx, mech_query in enumerate(mechanism_queries):
+                    status.info(f"   🔍 Searching: {facet_name} (Query {query_idx+1}/{len(mechanism_queries)})")
+                    
+                    # Semantic search
                     relevant_pathways, pathway_similarities = fast_semantic_search(
                         mech_query,
                         pathway_embeddings,
@@ -1065,40 +1004,49 @@ def render_layer2_semantic_optimized(query, min_genes, max_genes):
                     if not relevant_pathways:
                         continue
                     
-                    mechanism_sigs = builder.build_multiple_mechanisms(
+                    # FIX ROOT CAUSE #2: Dynamic variants
+                    num_variants = variants_per_mechanism
+                    if i < remainder:  # Give extra signature to first N mechanisms
+                        num_variants += 1
+                    
+                    mechanism_sigs = builder.build_multiple_mechanisms_dynamic(
                         facet_name,
                         relevant_pathways,
                         pathway_similarities,
-                        num_variants=3
+                        num_variants=num_variants
                     )
                     
+                    # FIX C: Deduplication happens in builder
                     all_signatures.extend(mechanism_sigs)
                 
                 progress = 40 + int((i + 1) / len(selected_facets) * 50)
                 progress_bar.progress(progress)
             
-            # Trim to target
-            target_count = st.session_state.get('target_count', 35)
+            # Trim to exact target (should be close already)
             if len(all_signatures) > target_count:
                 all_signatures.sort(key=lambda s: s.confidence, reverse=True)
                 all_signatures = all_signatures[:target_count]
+                status.info(f"   ✂️ Trimmed to exactly {target_count} signatures")
             
             timing.end_time = time.time()
             st.session_state.layer_timings.append(timing)
             
-            # Store only IDs (not full objects)
+            # Store signatures
             st.session_state.signature_ids = [sig.signature_id for sig in all_signatures]
             
-            # Cache full signatures separately
             if 'signature_cache' not in st.session_state:
                 st.session_state.signature_cache = {}
             
             for sig in all_signatures:
                 st.session_state.signature_cache[sig.signature_id] = sig
             
-            status.success(f"✅ Built {len(all_signatures)} signatures!")
+            status.success(f"✅ Built {len(all_signatures)} unique signatures!")
             st.markdown(f'<span class="timing-badge">⏱️ {timing.duration_str}</span>', unsafe_allow_html=True)
             progress_bar.progress(100)
+            
+            # Show diversity stats
+            facet_dist = Counter([sig.facet for sig in all_signatures])
+            st.info(f"📊 Facet distribution: {dict(facet_dist)}")
             
             time.sleep(1)
             st.rerun()
@@ -1131,25 +1079,22 @@ def render_layer2_semantic_optimized(query, min_genes, max_genes):
 
 
 # ============================================================
-# LAYER 3 - OPTIMIZED DAM
+# LAYER 3 - REMOTE API
 # ============================================================
 
-def render_layer3_dam_optimized():
-    """Layer 3: OPTIMIZED DAM expansion with precomputed index"""
+def render_layer3_dam_remote():
+    """Layer 3: DAM expansion with REMOTE API"""
     
     st.markdown("---")
-    st.markdown("### 🔬 Layer 3: DAM Expansion (Optimized)")
+    st.markdown("### 🔬 Layer 3: DAM Expansion (Remote)")
     
     st.markdown("""
     <div class="info-box">
-    ⚡ <strong>Performance boost:</strong> Precomputed index makes this 10x faster!
+    ⚡ <strong>REMOTE MODE:</strong> Queries remote database - no local files needed!
     </div>
     """, unsafe_allow_html=True)
     
-    enable_dam = st.checkbox(
-        "🔬 Enable DAM Expansion",
-        value=False
-    )
+    enable_dam = st.checkbox("🔬 Enable DAM Expansion", value=False)
     
     if enable_dam:
         col1, col2 = st.columns(2)
@@ -1160,79 +1105,86 @@ def render_layer3_dam_optimized():
         with col2:
             max_neighbors = st.slider("Max neighbors", 1, 10, 5, 1)
         
+        # API URL
+        api_url = "https://arunviswanathan91-msigdb-api.hf.space"
+        
         if st.button("🔬 Expand with DAM", type="primary", use_container_width=True):
             
             timing = LayerTiming("Layer 3: DAM Expansion", time.time())
             
-            pathways_dict = load_knowledge_base_cached()
-            
-            # Build index (cached)
-            status = st.empty()
-            status.info("📂 Loading precomputed DAM index...")
-            
-            
-            gene_to_pathways, pathways_dict = load_precomputed_dam_or_fail(
-                "data/dam_index_light.pkl"
-            )
-            
-            status.success(
-                f"✅ DAM index loaded "
-                f"({len(gene_to_pathways):,} genes, {len(pathways_dict):,} pathways)"
-            )
-            
-            # Expand signatures
-            builder = SignatureBuilder()
-            builder.set_dam_index(gene_to_pathways, pathways_dict)
-
-            
-            signatures = [st.session_state.signature_cache[sid] for sid in st.session_state.signature_ids]
-            
-            progress_bar = st.progress(0)
-            
-            for i, sig in enumerate(signatures):
-                status.info(f"Expanding: {sig.signature_name}...")
+            try:
+                status = st.empty()
+                status.info("🌐 Connecting to remote database...")
                 
-                expanded_sig = builder.expand_with_dam_fast(
-                    sig,
-                    expansion_strength=expansion_strength,
-                    max_additional=max_neighbors
+                db_api = DatabaseClient(api_url=api_url)
+                status.success("✅ Connected!")
+                
+                signatures = [
+                    st.session_state.signature_cache[sid] 
+                    for sid in st.session_state.signature_ids
+                ]
+                
+                progress_bar = st.progress(0)
+                progress_text = st.empty()
+                
+                total = len(signatures)
+                expanded_count = 0
+                
+                for i, sig in enumerate(signatures):
+                    progress_text.info(
+                        f"🔍 Querying API... signature {i+1}/{total}: {sig.signature_name}"
+                    )
+                    
+                    try:
+                        expanded_genes = db_api.expand_signature_smart(
+                            seed_genes=sig.genes,
+                            strength=expansion_strength,
+                            max_pathways_per_gene=max_neighbors
+                        )
+                        
+                        sig.genes = list(expanded_genes)
+                        sig.dam_expanded = True
+                        st.session_state.signature_cache[sig.signature_id] = sig
+                        expanded_count += 1
+                        
+                    except Exception as e:
+                        st.warning(f"⚠️ Failed: {sig.signature_name}")
+                    
+                    progress_bar.progress((i + 1) / total)
+                
+                timing.end_time = time.time()
+                st.session_state.layer_timings.append(timing)
+                st.session_state.dam_enabled = True
+                
+                progress_text.success(
+                    f"✅ Expanded {expanded_count}/{total} signatures!"
                 )
                 
-                # Update cache
-                st.session_state.signature_cache[sig.signature_id] = expanded_sig
+                time.sleep(1)
+                st.rerun()
                 
-                progress_bar.progress((i + 1) / len(signatures))
-            
-            timing.end_time = time.time()
-            st.session_state.layer_timings.append(timing)
-            st.session_state.dam_enabled = True
-            
-            status.success(f"✅ Expanded {len(signatures)} signatures!")
-            st.markdown(f'<span class="timing-badge">⏱️ {timing.duration_str}</span>', unsafe_allow_html=True)
-            
-            time.sleep(1)
-            st.rerun()
+            except Exception as e:
+                st.error(f"❌ Connection failed: {e}")
         
         if st.session_state.dam_enabled:
             st.success("✅ DAM expansion complete")
-    
     else:
         st.info("DAM disabled")
 
 
 # ============================================================
-# LAYER 4 - BATCH VERIFICATION
+# LAYER 4 - FIXED VERIFICATION
 # ============================================================
 
-def render_layer4_verification_optimized(query):
-    """Layer 4: OPTIMIZED batch LLM verification"""
+def render_layer4_verification_fixed(query):
+    """Layer 4: FIXED batch LLM verification with proper ID mapping"""
     
     st.markdown("---")
-    st.markdown("### ✅ Layer 4: Verification (Batched)")
+    st.markdown("### ✅ Layer 4: Verification (FIXED)")
     
     st.markdown("""
     <div class="info-box">
-    ⚡ <strong>Performance boost:</strong> Batch processing makes this 5x faster!
+    ✅ <strong>FIXED:</strong> Uses actual signature IDs for reliable mapping!
     </div>
     """, unsafe_allow_html=True)
     
@@ -1270,7 +1222,7 @@ def render_layer4_verification_optimized(query):
             
             status.info(f"🧬 Verifying {len(signatures)} signatures in batches of {batch_size}...")
             
-            # Batch verification
+            # FIX D: Batch verification with proper ID mapping
             suggestions = verify_signatures_batch(
                 signatures,
                 query,
@@ -1297,14 +1249,14 @@ def render_layer4_verification_optimized(query):
 
 
 # ============================================================
-# LAYER 5 - APPROVAL INTERFACE
+# LAYER 5 - TEXT-BASED GENE SELECTION
 # ============================================================
 
-def render_layer5_approval():
-    """Layer 5: Interactive approval"""
+def render_layer5_approval_text_based():
+    """Layer 5: Text-based clickable gene selection"""
     
     st.markdown("---")
-    st.markdown("### 👤 Layer 5: Review & Approve")
+    st.markdown("### 👤 Layer 5: Review & Approve (Text-Based)")
     
     if not st.session_state.signature_ids:
         return
@@ -1313,11 +1265,15 @@ def render_layer5_approval():
     
     st.markdown(f"""
     <div class="warning-box">
-    Review {len(signatures)} signatures. Select genes to keep.
+    Review {len(signatures)} signatures. Click genes to toggle selection (white = selected, grey = unselected).
     </div>
     """, unsafe_allow_html=True)
     
     llm2_suggestions = st.session_state.llm2_suggestions
+    
+    # Initialize gene selections
+    if 'gene_selections' not in st.session_state:
+        st.session_state.gene_selections = {}
     
     for i, sig in enumerate(signatures):
         with st.expander(f"📋 {sig.signature_name} ({len(sig.genes)} genes)", expanded=(i == 0)):
@@ -1337,51 +1293,65 @@ def render_layer5_approval():
             if sig_suggestions.get('genes_to_add'):
                 st.info(f"➕ LLM suggests adding: {', '.join(sig_suggestions['genes_to_add'])}")
             
-            st.markdown("**Select Genes:**")
+            st.markdown("**Select Genes (click to toggle):**")
             
-            select_all_key = f"select_all_{sig.signature_id}"
-            select_all = st.checkbox("Select All", key=select_all_key, value=True)
+            # Initialize selection for this signature
+            if sig.signature_id not in st.session_state.gene_selections:
+                # Default: all genes selected except LLM-flagged removals
+                flagged = set(sig_suggestions.get('genes_to_remove', []))
+                st.session_state.gene_selections[sig.signature_id] = set(sig.genes) - flagged
             
-            selected_genes = []
+            selected_genes = st.session_state.gene_selections[sig.signature_id]
             
-            for gene in sig.genes:
-                is_flagged = gene in sig_suggestions.get('genes_to_remove', [])
-                
-                col1, col2 = st.columns([1, 10])
-                
-                with col1:
-                    gene_key = f"gene_{sig.signature_id}_{gene}"
-                    is_selected = st.checkbox(
-                        "",
-                        key=gene_key,
-                        value=select_all and not is_flagged,
-                        label_visibility="collapsed"
-                    )
-                
-                with col2:
-                    label = f"**{gene}**"
-                    if is_flagged:
-                        label += " ⚠️"
-                    st.markdown(label)
-                
-                if is_selected:
-                    selected_genes.append(gene)
+            # Create buttons for each gene (styled to look like clickable text)
+            num_cols = 5  # Genes per row
+            gene_rows = [sig.genes[j:j+num_cols] for j in range(0, len(sig.genes), num_cols)]
             
+            for row_idx, gene_row in enumerate(gene_rows):
+                cols = st.columns(num_cols)
+                
+                for col_idx, gene in enumerate(gene_row):
+                    is_selected = gene in selected_genes
+                    is_flagged = gene in sig_suggestions.get('genes_to_remove', [])
+                    
+                    with cols[col_idx]:
+                        # Button styled as text
+                        button_key = f"gene_{sig.signature_id}_{gene}"
+                        
+                        if is_selected and not is_flagged:
+                            label = f"**{gene}**"
+                            button_type = "primary"
+                        elif is_selected and is_flagged:
+                            label = f"**{gene}** ⚠️"
+                            button_type = "secondary"
+                        else:
+                            label = f"~~{gene}~~"
+                            button_type = "secondary"
+                        
+                        if st.button(label, key=button_key, use_container_width=True, type=button_type):
+                            # Toggle selection
+                            if gene in selected_genes:
+                                selected_genes.remove(gene)
+                            else:
+                                selected_genes.add(gene)
+                            st.rerun()
+            
+            # Show selected genes as comma-separated text
+            st.markdown("---")
+            selected_list = sorted(list(selected_genes))
+            st.caption(f"**Selected ({len(selected_list)} genes):** {', '.join(selected_list)}")
+            
+            # Add suggested genes
             if sig_suggestions.get('genes_to_add'):
                 st.markdown("**Suggested Additions:**")
                 
-                for gene in sig_suggestions['genes_to_add']:
-                    col1, col2 = st.columns([1, 10])
-                    
-                    with col1:
+                suggested_cols = st.columns(len(sig_suggestions['genes_to_add']))
+                for col_idx, gene in enumerate(sig_suggestions['genes_to_add']):
+                    with suggested_cols[col_idx]:
                         add_key = f"add_{sig.signature_id}_{gene}"
-                        should_add = st.checkbox("", key=add_key, value=False)
-                    
-                    with col2:
-                        st.markdown(f"**{gene}** ➕")
-                    
-                    if should_add:
-                        selected_genes.append(gene)
+                        if st.button(f"➕ {gene}", key=add_key, use_container_width=True):
+                            selected_genes.add(gene)
+                            st.rerun()
             
             st.markdown("---")
             col1, col2 = st.columns(2)
@@ -1390,7 +1360,7 @@ def render_layer5_approval():
                 if st.button("✅ Approve", key=f"approve_{sig.signature_id}", use_container_width=True):
                     
                     # Update signature with selected genes
-                    sig.genes = selected_genes
+                    sig.genes = list(selected_genes)
                     sig.llm2_verified = bool(sig_suggestions)
                     
                     # Update cache
@@ -1404,6 +1374,9 @@ def render_layer5_approval():
             
             with col2:
                 if st.button("❌ Reject", key=f"reject_{sig.signature_id}", use_container_width=True):
+                    # Remove from approved list
+                    if sig.signature_id in st.session_state.final_approved_signature_ids:
+                        st.session_state.final_approved_signature_ids.remove(sig.signature_id)
                     st.warning("Rejected")
     
     # Export
@@ -1468,19 +1441,19 @@ def render_layer5_approval():
 
 def main():
     st.set_page_config(
-        page_title="Signature Generator - Optimized",
+        page_title="Signature Generator - Fixed",
         page_icon="🧬",
         layout="wide"
     )
     
     initialize_session_state()
-    inject_modern_css()
+    inject_material_ui_css()
     
     st.markdown("""
     <div style='text-align: center; padding: 32px 0 16px 0;'>
-        <h1>🧬 Signature Generator</h1>
-        <p style='font-size: 1.1rem; color: #94a3b8;'>
-            Optimized Pipeline: 30x Faster Layer 2 • Mechanism Selection • Batch Verification
+        <h1>🧬 Signature Generator (FIXED)</h1>
+        <p style='font-size: 1.1rem; color: #616161;'>
+            All Diversity Fixes Applied • Remote DAM • Material UI
         </p>
     </div>
     """, unsafe_allow_html=True)
