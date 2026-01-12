@@ -1,5 +1,5 @@
 """
-Biological Signature Generator - FULLY FIXED VERSION
+Biological Signature Generator - PUBLICATION-GRADE VERSION
 ====================================================
 
 FIXES APPLIED:
@@ -12,6 +12,13 @@ FIXES APPLIED:
 ✅ Root Cause #2: Dynamic variant allocation
 ✅ DAM: Remote API integration
 ✅ UI: Text-based gene selection
+
+PUBLICATION-GRADE ENHANCEMENTS:
+✅ Mode toggle (Exploratory vs Publication)
+✅ Biological context collection
+✅ Housekeeping gene filter
+✅ Context-aware verification
+✅ Mode + context in exports
 
 PERFORMANCE:
 - Layer 2: 10 separate searches (true diversity)
@@ -46,6 +53,71 @@ from material_design_theme import (
     material_download_button,
 )
 
+
+# ============================================================
+# HOUSEKEEPING GENES FILTER (NEW: Publication-Grade)
+# ============================================================
+
+HOUSEKEEPING_GENES = {
+    # Glycolysis/Metabolism
+    'GAPDH', 'GAPDHS', 'PGK1', 'ENO1', 'PKM', 'ALDOA', 'TPI1',
+    'LDHA', 'LDHB', 'G6PD', 'PFKM', 'PFKL',
+    
+    # Cytoskeleton
+    'ACTB', 'ACTG1', 'TUBB', 'TUBA1A', 'TUBA1B', 'TUBA1C',
+    'TUBB4B', 'TUBA4A', 'TUBB2A', 'TUBB3',
+    
+    # Translation/Protein Synthesis
+    'B2M', 'PPIA', 'PPIB', 'RPLP0', 'RPL13A', 'RPS18',
+    'HPRT1', 'TBP', 'YWHAZ', 'UBC', 'EEF1A1',
+    
+    # Heat Shock
+    'HSP90AB1', 'HSPA8', 'HSPD1', 'HSPA1A', 'HSP90AA1',
+}
+
+
+def filter_housekeeping_genes(
+    genes: List[str], 
+    mode: str = 'exploratory'
+) -> Tuple[List[str], List[str]]:
+    """
+    Filter housekeeping genes based on generation mode.
+    
+    Args:
+        genes: List of gene symbols
+        mode: 'exploratory' or 'publication'
+    
+    Returns:
+        (filtered_genes, removed_genes)
+    """
+    filtered = []
+    removed = []
+    
+    for gene in genes:
+        is_housekeeping = False
+        
+        # Check exact match
+        if gene in HOUSEKEEPING_GENES:
+            is_housekeeping = True
+        
+        # Check ribosomal proteins (but exclude disease-relevant ones)
+        elif gene.startswith(('RPL', 'RPS', 'MRPL', 'MRPS')):
+            if gene not in ['RPL22', 'RPS19', 'RPS24']:
+                is_housekeeping = True
+        
+        # Check mitochondrial
+        elif gene.startswith('MT-'):
+            is_housekeeping = True
+        
+        if is_housekeeping:
+            removed.append(gene)
+            # In publication mode, actually remove them
+            if mode == 'publication':
+                continue
+        
+        filtered.append(gene)
+    
+    return filtered, removed
 
 
 # ============================================================
@@ -153,7 +225,7 @@ def load_precomputed_embeddings_or_fail(path="data/pathway_embeddings.pkl"):
 
 
 # ============================================================
-# SIGNATURE BUILDER - WITH DEDUPLICATION
+# SIGNATURE BUILDER - WITH DEDUPLICATION & HOUSEKEEPING FILTER
 # ============================================================
 
 class SignatureBuilder:
@@ -196,9 +268,26 @@ class SignatureBuilder:
             return None
         
         selected_genes = [gene for gene, score in selected_pairs]
-        scores_dict = dict(selected_pairs)
         
-        avg_score = np.mean([score for gene, score in selected_pairs])
+        # NEW: Apply housekeeping filter
+        mode = st.session_state.get('generation_mode', 'exploratory')
+        selected_genes, removed_hk = filter_housekeeping_genes(selected_genes, mode)
+        
+        # NEW: Log what was filtered
+        if removed_hk and len(removed_hk) > 0:
+            if mode == 'publication':
+                st.caption(f"🔬 Filtered {len(removed_hk)} housekeeping genes: {', '.join(removed_hk[:5])}{'...' if len(removed_hk) > 5 else ''}")
+            else:
+                st.caption(f"ℹ️ Contains {len(removed_hk)} housekeeping genes (flagged but not removed in exploratory mode)")
+        
+        # NEW: Check minimum AFTER filtering
+        if len(selected_genes) < self.min_genes:
+            return None
+        
+        # Rebuild scores dict with filtered genes
+        scores_dict = {gene: score for gene, score in selected_pairs if gene in selected_genes}
+        
+        avg_score = np.mean([score for gene, score in scores_dict.items()])
         confidence = min(0.99, avg_score)
         
         sig_id = f"{self._make_id(facet_name)}_{self._make_id(mechanism_name)}"
@@ -455,6 +544,7 @@ def verify_signatures_batch(
 ) -> Dict[str, Any]:
     """
     FIX D: Batch verification with proper signature ID mapping
+    NEW: Context-aware verification for publication mode
     
     Args:
         batch_size: Number of signatures per API call
@@ -468,6 +558,28 @@ def verify_signatures_batch(
     try:
         from huggingface_hub import InferenceClient
         client = InferenceClient(token=hf_token)
+        
+        # NEW: Get biological context if available
+        bio_context = st.session_state.get('bio_context')
+        generation_mode = st.session_state.get('generation_mode', 'exploratory')
+        
+        # NEW: Build context string for LLM
+        if bio_context:
+            context_str = f"""
+BIOLOGICAL CONTEXT:
+- Species: {bio_context['species']}
+- Tissue: {bio_context['tissue']}
+- Disease: {bio_context['disease']}
+"""
+            if bio_context.get('cell_type'):
+                context_str += f"- Cell Type: {bio_context['cell_type']}\n"
+            if bio_context.get('treatment'):
+                context_str += f"- Treatment: {bio_context['treatment']}\n"
+            
+            if generation_mode == 'publication':
+                context_str += "\n⚠️ PUBLICATION MODE: Apply strict biological validation standards.\n"
+        else:
+            context_str = "BIOLOGICAL CONTEXT: Not specified (exploratory mode)\n"
         
         # Process in batches
         num_batches = (len(signatures) + batch_size - 1) // batch_size
@@ -491,11 +603,20 @@ def verify_signatures_batch(
             else:
                 task = "Identify genes to remove (if any) AND suggest genes to add (max 3 per signature)."
             
+            # NEW: Include context in prompt
             prompt = f"""Review these {len(batch)} gene signatures for biological correctness.
+
+{context_str}
 
 Original Query: {original_query}
 
 {signatures_text}
+
+Validation Criteria ({generation_mode} mode):
+1. Remove housekeeping genes (GAPDH, ACTB, B2M, ribosomal proteins)
+2. {"Check tissue specificity for " + bio_context['tissue'] if bio_context else "Check general biological relevance"}
+3. Verify pathway coherence (no contradictory mechanisms)
+4. {"Require strong evidence for publication" if generation_mode == 'publication' else "Flag uncertain genes"}
 
 Task: {task}
 
@@ -581,6 +702,10 @@ def initialize_session_state():
         'token_validated': False,
         'token_error': False,  # FIX B: Add explicit error flag
         'kb_loaded': False,
+        
+        # NEW: Publication-grade settings
+        'generation_mode': 'exploratory',  # 'exploratory' or 'publication'
+        'bio_context': None,
         
         # Layer 1
         'decomposition_result': None,
@@ -680,6 +805,15 @@ def render_sidebar():
         
         st.markdown("---")
         
+        # NEW: Mode indicator
+        mode = st.session_state.get('generation_mode', 'exploratory')
+        if mode == 'publication':
+            st.info("📄 **Mode:** Publication")
+        else:
+            st.info("🔍 **Mode:** Exploratory")
+        
+        st.markdown("---")
+        
         # Timing diagnostics
         if st.session_state.layer_timings:
             st.markdown("### ⏱️ Performance")
@@ -743,7 +877,180 @@ def render_generation_tab():
         st.warning("⚠️ Please validate HuggingFace token")
         return
     
-
+    # ============================================================
+    # NEW: MODE SELECTION
+    # ============================================================
+    st.markdown("### 🎚️ Generation Mode")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if material_button(
+            "🔍 Exploratory Mode",
+            type="primary" if st.session_state.get('generation_mode', 'exploratory') == 'exploratory' else "secondary",
+            use_container_width=True,
+            key="btn_exploratory"
+        ):
+            st.session_state['generation_mode'] = 'exploratory'
+            st.rerun()
+    
+    with col2:
+        if material_button(
+            "📄 Publication Mode",
+            type="primary" if st.session_state.get('generation_mode', 'exploratory') == 'publication' else "secondary",
+            use_container_width=True,
+            key="btn_publication"
+        ):
+            st.session_state['generation_mode'] = 'publication'
+            st.rerun()
+    
+    # Show mode description
+    mode = st.session_state.get('generation_mode', 'exploratory')
+    
+    if mode == 'publication':
+        st.markdown("""
+        <div style='background: linear-gradient(135deg, rgba(33, 150, 243, 0.1), rgba(21, 101, 192, 0.1)); 
+                    padding: 1.2rem; border-radius: 12px; margin: 1rem 0; 
+                    border-left: 4px solid #2196F3;'>
+        📄 <strong style='font-size: 1.1em;'>Publication Mode Active</strong><br><br>
+        ✅ Requires biological context (species, tissue, disease)<br>
+        ✅ Removes housekeeping genes automatically<br>
+        ✅ Includes validation metadata in exports<br>
+        ⚠️ Results are tagged for reproducibility
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown("""
+        <div style='background: linear-gradient(135deg, rgba(76, 175, 80, 0.1), rgba(56, 142, 60, 0.1)); 
+                    padding: 1.2rem; border-radius: 12px; margin: 1rem 0; 
+                    border-left: 4px solid #4CAF50;'>
+        🔍 <strong style='font-size: 1.1em;'>Exploratory Mode Active</strong><br><br>
+        ⚡ Fast hypothesis generation<br>
+        ⚡ Minimal validation (quick iteration)<br>
+        ⚠️ <strong>Results NOT suitable for publication</strong>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    st.markdown("---")
+    
+    # ============================================================
+    # NEW: BIOLOGICAL CONTEXT (Required for Publication Mode)
+    # ============================================================
+    
+    if mode == 'publication':
+        st.markdown("### 📋 Biological Context (Required)")
+        st.caption("This information ensures reproducibility and biological validity")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            species = material_select(
+                "Species*",
+                ["Homo sapiens", "Mus musculus"],
+                index=0,
+                key="species_select"
+            )
+        
+        with col2:
+            tissue_type = material_select(
+                "Primary Tissue*",
+                [
+                    "Blood/PBMC",
+                    "Adipose Tissue",
+                    "Liver",
+                    "Brain",
+                    "Lung",
+                    "Intestine",
+                    "Pancreas",
+                    "Kidney",
+                    "Heart",
+                    "Muscle",
+                    "Skin",
+                    "Custom"
+                ],
+                index=0,
+                key="tissue_select"
+            )
+            
+            if tissue_type == "Custom":
+                tissue_type = material_text_field(
+                    "Specify tissue",
+                    placeholder="e.g., Kidney cortex",
+                    key="custom_tissue"
+                )
+        
+        with col3:
+            disease_context = material_text_field(
+                "Disease/Condition*",
+                placeholder="e.g., obesity, type 2 diabetes",
+                key="disease_input"
+            )
+        
+        # Optional fields
+        with st.expander("➕ Additional Context (Optional but Recommended)"):
+            col_a, col_b = st.columns(2)
+            
+            with col_a:
+                cell_type = material_text_field(
+                    "Cell Type",
+                    placeholder="e.g., CD4+ T cells, adipocytes",
+                    key="cell_type_input"
+                )
+            
+            with col_b:
+                treatment = material_text_field(
+                    "Treatment/Condition",
+                    placeholder="e.g., LPS-stimulated, untreated",
+                    key="treatment_input"
+                )
+        
+        # Validation
+        if not disease_context or not disease_context.strip():
+            st.error("⚠️ Disease/Condition is required for Publication Mode")
+            st.info("💡 Switch to Exploratory Mode if you want to skip this")
+            return
+        
+        # Store context
+        st.session_state['bio_context'] = {
+            'species': species,
+            'tissue': tissue_type,
+            'disease': disease_context.strip(),
+            'cell_type': cell_type.strip() if cell_type else None,
+            'treatment': treatment.strip() if treatment else None,
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        st.markdown("---")
+    
+    else:
+        # Exploratory mode - context optional
+        st.markdown("### 📋 Biological Context (Optional)")
+        
+        with st.expander("⚙️ Add Context (Recommended for Better Results)"):
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                species = material_select("Species", ["Homo sapiens", "Mus musculus"], key="species_exp")
+                tissue_type = material_text_field("Tissue", placeholder="e.g., Blood", key="tissue_exp")
+            
+            with col2:
+                disease_context = material_text_field("Disease", placeholder="e.g., obesity", key="disease_exp")
+                cell_type = material_text_field("Cell Type", placeholder="e.g., T cells", key="cell_exp")
+            
+            if disease_context and disease_context.strip():
+                st.session_state['bio_context'] = {
+                    'species': species,
+                    'tissue': tissue_type or 'unspecified',
+                    'disease': disease_context.strip(),
+                    'cell_type': cell_type.strip() if cell_type else None,
+                    'treatment': None,
+                    'timestamp': datetime.now().isoformat()
+                }
+            else:
+                st.session_state['bio_context'] = None
+        
+        st.markdown("---")
+    
     # Query input
     st.markdown("### Research Question")
     query = material_text_area(
@@ -1432,13 +1739,16 @@ def render_layer5_approval_text_based():
             )
         
         with col2:
-            # JSON
+            # NEW: Include mode + context in export
             results = {
                 'query': st.session_state.get('main_query', ''),
+                'generation_mode': st.session_state.get('generation_mode', 'exploratory'),  # NEW!
+                'biological_context': st.session_state.get('bio_context'),  # NEW!
                 'signatures': [sig.to_dict() for sig in approved_sigs],
                 'total_signatures': len(approved_sigs),
                 'timestamp': datetime.now().isoformat(),
-                'layer_timings': {t.layer_name: t.duration_str for t in st.session_state.layer_timings}
+                'layer_timings': {t.layer_name: t.duration_str for t in st.session_state.layer_timings},
+                'pipeline_version': '2.1-publication-grade',  # NEW: Updated version
             }
             
             st.download_button(
@@ -1456,7 +1766,7 @@ def render_layer5_approval_text_based():
 
 def main():
     st.set_page_config(
-        page_title="Signature Generator - Fixed",
+        page_title="Signature Generator - Publication Grade",
         page_icon="🧬",
         layout="wide"
     )
@@ -1466,9 +1776,9 @@ def main():
     
     st.markdown("""
     <div style='text-align: center; padding: 32px 0 16px 0;'>
-        <h1>🧬 Signature Generator (FIXED)</h1>
+        <h1>🧬 Signature Generator</h1>
         <p style='font-size: 1.1rem; color: #616161;'>
-            All Diversity Fixes Applied • Remote DAM • Material UI
+            Publication-Grade • All Fixes Applied • Remote DAM • Material UI
         </p>
     </div>
     """, unsafe_allow_html=True)
