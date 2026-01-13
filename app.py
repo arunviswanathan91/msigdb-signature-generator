@@ -1029,14 +1029,14 @@ def render_generation_tab():
         with st.expander("⚙️ Add Context (Recommended for Better Results)"):
             col1, col2 = st.columns(2)
             
+           
             with col1:
                 species = material_select("Species", ["Homo sapiens", "Mus musculus"], key="species_exp")
-                tissue_type = material_text_field("Tissue", placeholder="e.g., Blood", key="tissue_exp")
+                tissue_type = st.text_input("Tissue", placeholder="e.g., Blood", key="tissue_exp")
             
             with col2:
-                disease_context = material_text_field("Disease", placeholder="e.g., obesity", key="disease_exp")
-                cell_type = material_text_field("Cell Type", placeholder="e.g., T cells", key="cell_exp")
-            
+                disease_context = st.text_input("Disease", placeholder="e.g., obesity", key="disease_exp")
+                cell_type = st.text_input("Cell Type", placeholder="e.g., T cells", key="cell_exp")
             if disease_context and disease_context.strip():
                 st.session_state['bio_context'] = {
                     'species': species,
