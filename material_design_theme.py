@@ -5,11 +5,13 @@ import streamlit as st
 #    (These map your custom names to standard Streamlit widgets)
 # ==============================================================================
 
-def material_text_field(label, value="", type="default", help=None, key=None):
-    return st.text_input(label, value=value, type=type, help=help, key=key)
+
+def material_text_field(label, value="", type="default", help=None, key=None, placeholder=None):
+    return st.text_input(label, value=value, type=type, help=help, key=key, placeholder=placeholder)
+
 
 def material_text_area(label, value="", height=None, placeholder=None, key=None):
-    return st.text_area(label, value=value, height=height, placeholder=placeholder, key=key)
+    return st.text_area(label, value=value, height=height, placeholder=placeholder if placeholder else "", key=key)
 
 def material_slider(label, min_value, max_value, value, step=None, help=None, key=None):
     return st.slider(label, min_value, max_value, value, step=step, help=help, key=key)
