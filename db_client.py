@@ -1,15 +1,14 @@
 """
-Database Client - Enhanced Version (v3.0)
+Database Client - CORRECTED Version (v3.0)
 ==========================================
-Now includes methods for GTEx expression, GSEA cache, and Gene Evidence!
+Fixed endpoint names to match db_server.py
 
-NEW METHODS:
-- get_gene_expression()
-- get_gene_expression_in_tissue()
-- get_gene_expression_batch()
-- gsea_lookup()
-- get_gene_evidence()
-- get_gene_evidence_batch()
+CORRECTED ENDPOINTS:
+- /api/expression/{gene} (was: gene-expression)
+- /api/expression/batch (was: gene-expression/batch)
+- /api/enrichment (was: gsea-lookup)
+- /api/evidence/{gene} (was: gene-evidence)
+- /api/evidence/batch (was: gene-evidence/batch)
 """
 
 import requests
@@ -29,7 +28,7 @@ class DatabaseClient:
         """
         Args:
             api_url: URL of your database server
-                    e.g., "https://username-msigdb-api.hf.space"
+                    e.g., "https://arunviswanathan91-msigdb-api.hf.space"
         """
         self.api_url = api_url.rstrip('/')
         
@@ -55,11 +54,11 @@ class DatabaseClient:
             data = response.json()
             
             # Show enhanced data availability
-            enhanced = data.get('enhanced_data', {})
+            enhanced = data.get('enhanced', {})
             status_msg = f"🟢 Database connected (v{data.get('version', 'unknown')})\n"
-            status_msg += f"  • GTEx: {enhanced.get('gtex_expression', 0):,} genes\n"
-            status_msg += f"  • GSEA: {enhanced.get('gsea_cache', 0):,} entries\n"
-            status_msg += f"  • Evidence: {enhanced.get('gene_evidence', 0):,} genes"
+            status_msg += f"  • GTEx: {enhanced.get('gtex_genes', 0):,} genes\n"
+            status_msg += f"  • GSEA: {enhanced.get('gsea_entries', 0):,} entries\n"
+            status_msg += f"  • Evidence: {enhanced.get('evidence_genes', 0):,} genes"
             
             st.sidebar.success(status_msg)
         except Exception as e:
@@ -101,7 +100,7 @@ class DatabaseClient:
         
         response = self.session.post(
             f"{self.api_url}/api/expand-signature",
-            json=seed_genes,
+            json={'seed_genes': seed_genes},
             params=params,
             timeout=30
         )
@@ -119,7 +118,7 @@ class DatabaseClient:
         return response.json()
     
     # ============================================================
-    # NEW METHODS - GTEx EXPRESSION
+    # CORRECTED METHODS - GTEx EXPRESSION
     # ============================================================
     
     def get_gene_expression(self, gene: str) -> Optional[Dict]:
@@ -132,14 +131,14 @@ class DatabaseClient:
         Returns:
             {
                 "gene": "IL17A",
-                "expression": {"Colon_Transverse_Mucosa": 0.016911, ...},
+                "tissues": {"Colon_Transverse_Mucosa": 0.016911, ...},
                 "tissue_count": 56
             }
             or None if gene not found
         """
         try:
             response = self.session.get(
-                f"{self.api_url}/api/gene-expression/{gene}",
+                f"{self.api_url}/api/expression/{gene}",  # CORRECTED
                 timeout=10
             )
             response.raise_for_status()
@@ -155,7 +154,7 @@ class DatabaseClient:
         
         Args:
             gene: Gene symbol
-            tissue: Tissue name (use underscores, e.g., "Colon_Transverse_Mucosa")
+            tissue: Tissue name (e.g., "Adipose Tissue", "Liver")
         
         Returns:
             {"gene": "IL17A", "tissue": "...", "tpm": 0.016911}
@@ -163,7 +162,7 @@ class DatabaseClient:
         """
         try:
             response = self.session.get(
-                f"{self.api_url}/api/gene-expression/{gene}/tissue/{tissue}",
+                f"{self.api_url}/api/expression/{gene}/{tissue}",  # CORRECTED
                 timeout=10
             )
             response.raise_for_status()
@@ -188,7 +187,7 @@ class DatabaseClient:
             }
         """
         response = self.session.post(
-            f"{self.api_url}/api/gene-expression/batch",
+            f"{self.api_url}/api/expression/batch",  # CORRECTED
             json=genes,
             timeout=30
         )
@@ -196,35 +195,33 @@ class DatabaseClient:
         return response.json()
     
     # ============================================================
-    # NEW METHODS - GSEA CACHE
+    # CORRECTED METHODS - GSEA CACHE
     # ============================================================
     
-    def gsea_lookup(self, gene_set: List[str], top_k: int = 10) -> Dict:
+    def check_enrichment(self, genes: List[str]) -> Dict:
         """
-        Look up GSEA enrichment results from cache.
+        Check GSEA enrichment cache.
         
         Args:
-            gene_set: List of gene symbols
-            top_k: Number of top pathways to return
+            genes: List of gene symbols
         
         Returns:
             {
-                "cache_hit": true/false,
+                "cached": true/false,
                 "gene_count": 10,
-                "pathways": [{"name": "...", "score": 0.95}, ...]
+                "pathways": [{"term": "...", "pval": 0.01, "fdr": 0.05}, ...]
             }
         """
         response = self.session.post(
-            f"{self.api_url}/api/gsea-lookup",
-            json=gene_set,
-            params={'top_k': top_k},
+            f"{self.api_url}/api/enrichment",  # CORRECTED (was gsea-lookup)
+            json={'genes': genes},
             timeout=30
         )
         response.raise_for_status()
         return response.json()
     
     # ============================================================
-    # NEW METHODS - GENE EVIDENCE
+    # CORRECTED METHODS - GENE EVIDENCE
     # ============================================================
     
     def get_gene_evidence(self, gene: str) -> Optional[Dict]:
@@ -247,7 +244,7 @@ class DatabaseClient:
         """
         try:
             response = self.session.get(
-                f"{self.api_url}/api/gene-evidence/{gene}",
+                f"{self.api_url}/api/evidence/{gene}",  # CORRECTED
                 timeout=10
             )
             response.raise_for_status()
@@ -272,7 +269,7 @@ class DatabaseClient:
             }
         """
         response = self.session.post(
-            f"{self.api_url}/api/gene-evidence/batch",
+            f"{self.api_url}/api/evidence/batch",  # CORRECTED
             json=genes,
             timeout=30
         )
@@ -283,99 +280,251 @@ class DatabaseClient:
     # CONVENIENCE METHODS
     # ============================================================
     
-    def get_genes_with_high_expression(
+    def filter_by_tissue_expression(
         self,
         genes: List[str],
         tissue: str,
         min_tpm: float = 1.0
-    ) -> List[str]:
+    ) -> tuple[List[str], List[str]]:
         """
         Filter genes by expression level in a specific tissue.
         
         Args:
-            genes: List of gene symbols to filter
+            genes: List of gene symbols
             tissue: Tissue name
             min_tpm: Minimum TPM threshold
         
         Returns:
-            List of genes with TPM >= min_tpm in the specified tissue
+            (kept_genes, removed_genes)
         """
         batch_result = self.get_gene_expression_batch(genes)
         
-        high_expression_genes = []
+        kept = []
+        removed = []
         
-        for gene, expression_data in batch_result['results'].items():
-            if tissue in expression_data:
-                tpm = expression_data[tissue]
+        for gene in genes:
+            if gene in batch_result['results']:
+                tissues_data = batch_result['results'][gene]
+                
+                # Try exact match
+                tpm = tissues_data.get(tissue, 0.0)
+                
+                # Try partial match if exact fails
+                if tpm == 0.0:
+                    for tissue_name, tpm_val in tissues_data.items():
+                        if tissue.lower() in tissue_name.lower():
+                            tpm = tpm_val
+                            break
+                
                 if tpm >= min_tpm:
-                    high_expression_genes.append(gene)
+                    kept.append(gene)
+                else:
+                    removed.append(gene)
+            else:
+                removed.append(gene)
         
-        return high_expression_genes
+        return kept, removed
     
-    def get_genes_with_strong_evidence(
+    def filter_by_evidence_strength(
         self,
-        genes: List[str]
-    ) -> List[str]:
+        genes: List[str],
+        min_strength: str = 'moderate'
+    ) -> tuple[List[str], List[str]]:
         """
-        Filter genes by evidence strength.
+        Filter genes by literature evidence strength.
         
         Args:
-            genes: List of gene symbols to filter
+            genes: List of gene symbols
+            min_strength: Minimum strength ('minimal', 'weak', 'moderate', 'strong')
         
         Returns:
-            List of genes with "strong" evidence
+            (kept_genes, removed_genes)
         """
         batch_result = self.get_gene_evidence_batch(genes)
         
-        strong_genes = []
+        strength_order = {'minimal': 0, 'weak': 1, 'moderate': 2, 'strong': 3}
+        threshold = strength_order.get(min_strength, 1)
         
-        for gene, evidence_data in batch_result['results'].items():
-            if evidence_data.get('evidence_strength') == 'strong':
-                strong_genes.append(gene)
+        kept = []
+        removed = []
         
-        return strong_genes
+        for gene in genes:
+            if gene in batch_result['results']:
+                evidence = batch_result['results'][gene]
+                gene_strength = evidence.get('evidence_strength', 'minimal')
+                
+                if strength_order.get(gene_strength, 0) >= threshold:
+                    kept.append(gene)
+                else:
+                    removed.append(gene)
+            else:
+                removed.append(gene)
+        
+        return kept, removed
+    
+    def validate_with_gsea(
+        self,
+        genes: List[str],
+        min_pvalue: float = 0.05
+    ) -> tuple[bool, Dict]:
+        """
+        Validate gene set using GSEA enrichment.
+        
+        Args:
+            genes: List of gene symbols
+            min_pvalue: P-value threshold
+        
+        Returns:
+            (is_valid, enrichment_data)
+        """
+        enrichment = self.check_enrichment(genes)
+        
+        if not enrichment.get('cached'):
+            return True, enrichment  # Can't validate if not cached
+        
+        pathways = enrichment.get('pathways', [])
+        significant = [p for p in pathways if p.get('pval', 1.0) < min_pvalue]
+        
+        is_valid = len(significant) > 0
+        
+        return is_valid, enrichment
     
     def enrich_genes_with_context(
         self,
         genes: List[str],
-        tissue: Optional[str] = None
-    ) -> List[Dict]:
+        tissue: Optional[str] = None,
+        include_enrichment: bool = True
+    ) -> Dict:
         """
-        Enrich gene list with expression and evidence data.
+        Gather ALL context for genes (for debate prompts).
         
         Args:
             genes: List of gene symbols
-            tissue: Optional tissue to include expression for
+            tissue: Optional tissue for expression
+            include_enrichment: Whether to include GSEA
         
         Returns:
-            List of enriched gene dictionaries with all available data
+            {
+                'expression': {gene: {tissue: tpm}},
+                'tissue_specific': {gene: tpm} if tissue provided,
+                'evidence': {gene: {pathway_count, pmids, ...}},
+                'enrichment': {cached, pathways} if requested
+            }
         """
-        # Get expression data
-        expression_result = self.get_gene_expression_batch(genes)
+        context = {}
         
-        # Get evidence data
-        evidence_result = self.get_gene_evidence_batch(genes)
+        # Get expression
+        expr_batch = self.get_gene_expression_batch(genes)
+        context['expression'] = expr_batch.get('results', {})
         
-        enriched_genes = []
+        # Get tissue-specific if provided
+        if tissue:
+            tissue_expr = {}
+            for gene, tissues_data in context['expression'].items():
+                # Try exact match
+                tpm = tissues_data.get(tissue, 0.0)
+                
+                # Try partial match
+                if tpm == 0.0:
+                    for tissue_name, tpm_val in tissues_data.items():
+                        if tissue.lower() in tissue_name.lower():
+                            tpm = tpm_val
+                            break
+                
+                tissue_expr[gene] = tpm
+            
+            context['tissue_specific'] = tissue_expr
+        
+        # Get evidence
+        evid_batch = self.get_gene_evidence_batch(genes)
+        context['evidence'] = evid_batch.get('results', {})
+        
+        # Get enrichment if requested
+        if include_enrichment:
+            context['enrichment'] = self.check_enrichment(genes)
+        
+        return context
+
+
+# ============================================================
+# HELPER: FORMAT EVIDENCE FOR LLM PROMPTS
+# ============================================================
+
+def format_evidence_for_debate(
+    genes: List[str],
+    context: Dict,
+    tissue: Optional[str] = None
+) -> str:
+    """
+    Format database evidence into human-readable text for LLM prompts.
+    
+    Args:
+        genes: List of gene symbols
+        context: Context dict from enrich_genes_with_context()
+        tissue: Optional tissue name
+    
+    Returns:
+        Formatted evidence string
+    """
+    lines = ["DATABASE EVIDENCE:", ""]
+    
+    # Tissue expression
+    if tissue and 'tissue_specific' in context:
+        lines.append(f"GTEx Expression in {tissue}:")
+        tissue_expr = context['tissue_specific']
         
         for gene in genes:
-            gene_data = {'gene': gene}
+            tpm = tissue_expr.get(gene, 0.0)
             
-            # Add expression
-            if gene in expression_result['results']:
-                if tissue:
-                    expr = expression_result['results'][gene].get(tissue, 0.0)
-                    gene_data['expression_tpm'] = expr
-                else:
-                    gene_data['expression'] = expression_result['results'][gene]
+            # Classify expression level
+            if tpm >= 10:
+                level = "high"
+            elif tpm >= 1:
+                level = "moderate"
+            elif tpm > 0:
+                level = "low"
+            else:
+                level = "not detected"
             
-            # Add evidence
-            if gene in evidence_result['results']:
-                evidence = evidence_result['results'][gene]
-                gene_data['evidence_strength'] = evidence.get('evidence_strength', 'unknown')
-                gene_data['pathway_count'] = evidence.get('pathway_count', 0)
-                gene_data['literature_count'] = evidence.get('literature_count', 0)
-            
-            enriched_genes.append(gene_data)
+            lines.append(f"  {gene}: {tpm:.2f} TPM ({level})")
         
-        return enriched_genes
+        lines.append("")
+    
+    # Literature evidence
+    if 'evidence' in context:
+        lines.append("Literature Evidence:")
+        evidence = context['evidence']
+        
+        for gene in genes:
+            gene_evid = evidence.get(gene, {})
+            pathway_count = gene_evid.get('pathway_count', 0)
+            lit_count = gene_evid.get('literature_count', 0)
+            strength = gene_evid.get('evidence_strength', 'unknown')
+            
+            lines.append(
+                f"  {gene}: {pathway_count} pathways, {lit_count} PMIDs, "
+                f"strength={strength}"
+            )
+        
+        lines.append("")
+    
+    # GSEA enrichment
+    if 'enrichment' in context:
+        enrichment = context['enrichment']
+        
+        if enrichment.get('cached'):
+            lines.append("GSEA Enrichment (cached):")
+            pathways = enrichment.get('pathways', [])[:5]  # Top 5
+            
+            for pw in pathways:
+                term = pw.get('term', 'Unknown')
+                pval = pw.get('pval', 1.0)
+                fdr = pw.get('fdr', 1.0)
+                lines.append(f"  - {term} (p={pval:.4f}, fdr={fdr:.4f})")
+            
+            lines.append("")
+        else:
+            lines.append("GSEA Enrichment: Not cached")
+            lines.append("")
+    
+    return "\n".join(lines)
