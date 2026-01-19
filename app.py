@@ -1,6 +1,6 @@
 """
-Biological Signature Generator - PUBLICATION-GRADE VERSION
-====================================================
+Biological Signature Generator - PUBLICATION-GRADE VERSION WITH DEBATE SYSTEM
+=============================================================================
 
 FIXES APPLIED:
 ✅ Fix A: DAM loader diagnostics
@@ -20,11 +20,18 @@ PUBLICATION-GRADE ENHANCEMENTS:
 ✅ Context-aware verification
 ✅ Mode + context in exports
 
+NEW - DEBATE SYSTEM:
+✅ Multi-round AI debate for signature validation
+✅ Database-grounded evidence injection
+✅ Material UI conversational chat interface
+✅ 3 LLMs: Qwen, Zephyr, Phi-3
+✅ Weighted voting & convergence tracking
+
 PERFORMANCE:
 - Layer 2: 10 separate searches (true diversity)
 - Layer 3: Remote API (no local 1.3GB file)
-- Layer 4: Batch verification with ID mapping
-- Total: ~2 minutes for 35 signatures
+- Layer 4: Batch verification OR Multi-round debate
+- Total: ~2-5 minutes for 35 signatures
 """
 
 import streamlit as st
@@ -40,6 +47,10 @@ from dataclasses import dataclass, field
 from collections import Counter, defaultdict
 import hashlib
 import pickle
+import asyncio
+import nest_asyncio
+
+# Original imports
 from db_client import DatabaseClient
 from material_design_theme import (
     inject_material_theme,
@@ -52,6 +63,28 @@ from material_design_theme import (
     material_button,
     material_download_button,
 )
+
+# NEW: Debate system imports
+try:
+    from db_client_enhanced import DatabaseClientEnhanced
+    from debate_system_with_injector import (
+        MultiRoundDebateEngine,
+        DebateMode,
+        DebateResult
+    )
+    from material_ui_builtin import (
+        inject_material_ui_css,
+        render_chat_message,
+        render_round_separator,
+        render_convergence_indicator
+    )
+    DEBATE_SYSTEM_AVAILABLE = True
+except ImportError as e:
+    DEBATE_SYSTEM_AVAILABLE = False
+    print(f"Debate system not available: {e}")
+
+# Apply nest_asyncio for Streamlit compatibility
+nest_asyncio.apply()
 
 
 # ============================================================
@@ -137,6 +170,7 @@ class GeneSignature:
     source_pathways: List[str] = field(default_factory=list)
     dam_expanded: bool = False
     llm2_verified: bool = False
+    debate_verified: bool = False  # NEW
     
     def to_dict(self):
         return {
@@ -149,7 +183,8 @@ class GeneSignature:
             'confidence': self.confidence,
             'top_genes': self.genes[:5] if len(self.genes) > 5 else self.genes,
             'dam_expanded': self.dam_expanded,
-            'llm2_verified': self.llm2_verified
+            'llm2_verified': self.llm2_verified,
+            'debate_verified': self.debate_verified  # NEW
         }
     
     def gene_set_hash(self) -> str:
@@ -692,6 +727,66 @@ If no changes needed, return empty lists."""
 
 
 # ============================================================
+# NEW: DEBATE SYSTEM WRAPPERS
+# ============================================================
+
+def run_validation_debate_sync(
+    genes: List[str],
+    tissue_context: Optional[str] = None,
+    max_rounds: int = 10
+) -> Optional[DebateResult]:
+    """
+    Synchronous wrapper for validation debate.
+    """
+    if not DEBATE_SYSTEM_AVAILABLE:
+        st.error("Debate system not available. Install required modules.")
+        return None
+    
+    try:
+        # Initialize debate engine
+        debate_engine = MultiRoundDebateEngine(
+            hf_token=st.session_state.hf_token,
+            db_client=st.session_state.db_client_enhanced
+        )
+        
+        # Run async debate
+        async def run():
+            return await debate_engine.run_validation_debate(
+                genes=genes,
+                tissue_context=tissue_context,
+                max_rounds=max_rounds,
+                convergence_threshold=0.85
+            )
+        
+        loop = asyncio.get_event_loop()
+        result = loop.run_until_complete(run())
+        
+        return result
+        
+    except Exception as e:
+        st.error(f"Debate failed: {e}")
+        import traceback
+        st.code(traceback.format_exc())
+        return None
+
+
+def initialize_enhanced_db_client():
+    """Initialize enhanced database client for debate system."""
+    if not DEBATE_SYSTEM_AVAILABLE:
+        return False
+    
+    if 'db_client_enhanced' not in st.session_state or st.session_state.db_client_enhanced is None:
+        try:
+            api_url = "https://arunviswanathan91-msigdb-api.hf.space"
+            st.session_state.db_client_enhanced = DatabaseClientEnhanced(api_url)
+            return True
+        except Exception as e:
+            st.error(f"Failed to initialize enhanced DB client: {e}")
+            return False
+    return True
+
+
+# ============================================================
 # SESSION STATE
 # ============================================================
 
@@ -720,6 +815,14 @@ def initialize_session_state():
         
         # Layer 4
         'llm2_suggestions': {},
+        'verification_method': 'batch',  # NEW: 'batch' or 'debate'
+        
+        # NEW: Debate system
+        'debate_enabled': False,
+        'debate_num_rounds': 10,
+        'current_debate_result': None,
+        'debate_history': [],
+        'db_client_enhanced': None,
         
         # Layer 5
         'final_approved_signature_ids': [],
@@ -812,6 +915,12 @@ def render_sidebar():
         else:
             st.info("🔍 **Mode:** Exploratory")
         
+        # NEW: Debate system status
+        if DEBATE_SYSTEM_AVAILABLE:
+            st.success("✅ Debate System: Available")
+        else:
+            st.warning("⚠️ Debate System: Not Available")
+        
         st.markdown("---")
         
         # Timing diagnostics
@@ -829,12 +938,12 @@ def render_sidebar():
         st.markdown("---")
         st.markdown("### ℹ️ Pipeline")
         st.caption("""
-        **Fixed Layers:**
+        **Layers:**
         
         1. 🧠 Granularity + Selection
         2. 🔍 Semantic (ALL queries)
         3. 🔬 DAM (Remote API)
-        4. ✅ Verification (ID mapping)
+        4. ✅ Verification (Batch OR Debate)
         5. 👤 Approval (Text-based)
         """)
 
@@ -878,7 +987,7 @@ def render_generation_tab():
         return
     
     # ============================================================
-    # NEW: MODE SELECTION
+    # MODE SELECTION
     # ============================================================
     st.markdown("### 🎚️ Generation Mode")
     
@@ -934,7 +1043,7 @@ def render_generation_tab():
     st.markdown("---")
     
     # ============================================================
-    # NEW: BIOLOGICAL CONTEXT (Required for Publication Mode)
+    # BIOLOGICAL CONTEXT
     # ============================================================
     
     if mode == 'publication':
@@ -1029,7 +1138,6 @@ def render_generation_tab():
         with st.expander("⚙️ Add Context (Recommended for Better Results)"):
             col1, col2 = st.columns(2)
             
-           
             with col1:
                 species = material_select("Species", ["Homo sapiens", "Mus musculus"], key="species_exp")
                 tissue_type = st.text_input("Tissue", placeholder="e.g., Blood", key="tissue_exp")
@@ -1037,6 +1145,7 @@ def render_generation_tab():
             with col2:
                 disease_context = st.text_input("Disease", placeholder="e.g., obesity", key="disease_exp")
                 cell_type = st.text_input("Cell Type", placeholder="e.g., T cells", key="cell_exp")
+            
             if disease_context and disease_context.strip():
                 st.session_state['bio_context'] = {
                     'species': species,
@@ -1059,7 +1168,6 @@ def render_generation_tab():
         height=80,
         placeholder="Example: Th17 role in obesity"
     )
-
     
     # Parameters
     col1, col2, col3 = st.columns(3)
@@ -1092,7 +1200,7 @@ def render_generation_tab():
     
     render_layer3_dam_remote()
     
-    render_layer4_verification_fixed(query)
+    render_layer4_verification_with_debate(query)  # NEW: Enhanced with debate
     
     render_layer5_approval_text_based()
 
@@ -1176,7 +1284,6 @@ def render_layer1_granularity(query, target_count, min_genes, max_genes):
             
             with col1:
                 is_selected = facet['facet_id'] in st.session_state.selected_mechanism_ids
-                
                 
                 if material_checkbox(
                     f"select_{facet['facet_id']}",
@@ -1495,45 +1602,102 @@ def render_layer3_dam_remote():
 
 
 # ============================================================
-# LAYER 4 - FIXED VERIFICATION
+# LAYER 4 - NEW: VERIFICATION WITH DEBATE SYSTEM
 # ============================================================
 
-def render_layer4_verification_fixed(query):
-    """Layer 4: FIXED batch LLM verification with proper ID mapping"""
+def render_layer4_verification_with_debate(query):
+    """Layer 4: Enhanced verification with debate system option"""
     
     st.markdown("---")
-    st.markdown("### ✅ Layer 4: Verification (FIXED)")
+    st.markdown("### ✅ Layer 4: Verification")
+    
+    if not DEBATE_SYSTEM_AVAILABLE:
+        st.markdown("""
+        <div class="warning-box">
+        ⚠️ <strong>Debate System Not Available</strong><br>
+        Using standard batch verification only. To enable debate system, install:<br>
+        • db_client_enhanced.py<br>
+        • debate_system_with_injector.py<br>
+        • material_ui_builtin.py
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Fall back to standard verification
+        render_layer4_standard_verification(query)
+        return
+    
+    # Inject Material UI CSS for debate
+    inject_material_ui_css()
     
     st.markdown("""
     <div class="info-box">
-    ✅ <strong>FIXED:</strong> Uses actual signature IDs for reliable mapping!
+    🆕 <strong>Choose verification method:</strong> Traditional batch LLM or Multi-round AI Debate
     </div>
     """, unsafe_allow_html=True)
+    
+    # Method selection
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if material_button(
+            "📋 Batch Verification",
+            type="primary" if st.session_state.get('verification_method') == 'batch' else "secondary",
+            use_container_width=True,
+            key="btn_batch_verify"
+        ):
+            st.session_state.verification_method = 'batch'
+            st.rerun()
+    
+    with col2:
+        if material_button(
+            "🗣️ Multi-Round Debate",
+            type="primary" if st.session_state.get('verification_method') == 'debate' else "secondary",
+            use_container_width=True,
+            key="btn_debate_verify"
+        ):
+            st.session_state.verification_method = 'debate'
+            st.rerun()
+    
+    method = st.session_state.get('verification_method', 'batch')
+    
+    if method == 'batch':
+        render_layer4_standard_verification(query)
+    else:
+        render_layer4_debate_verification(query)
+
+
+def render_layer4_standard_verification(query):
+    """Standard batch LLM verification (original implementation)"""
+    
+    st.markdown("#### 📋 Batch LLM Verification")
     
     verification_mode = st.radio(
         "Mode:",
         ["None", "Verify Only", "Verify + Expand"],
-        index=0
+        index=0,
+        key="batch_mode"
     )
     
     if verification_mode != "None":
         
         llm2_model = material_select(
             "Model:",
-            ["stanford-crfm/BioMedLM", "microsoft/BioGPT-Large"]
+            ["stanford-crfm/BioMedLM", "microsoft/BioGPT-Large"],
+            key="llm2_model"
         )
         
         context_options = material_multiselect(
             "Context:",
             ["Original query context", "Pathway sources used", "Mechanism description", "All of the above"],
-            default=["All of the above"]
+            default=["All of the above"],
+            key="context_opts"
         )
         
-        batch_size = material_slider("Batch size:", 1, 10, 5, 1, help="Signatures per API call")
+        batch_size = material_slider("Batch size:", 1, 10, 5, 1, help="Signatures per API call", key="batch_size_slider")
         
-        if material_button("🧬 Run Verification", type="primary", use_container_width=True):
+        if material_button("🧬 Run Batch Verification", type="primary", use_container_width=True, key="run_batch"):
             
-            timing = LayerTiming("Layer 4: LLM Verification", time.time())
+            timing = LayerTiming("Layer 4: Batch Verification", time.time())
             
             signatures = [st.session_state.signature_cache[sid] for sid in st.session_state.signature_ids]
             
@@ -1544,7 +1708,6 @@ def render_layer4_verification_fixed(query):
             
             status.info(f"🧬 Verifying {len(signatures)} signatures in batches of {batch_size}...")
             
-            # FIX D: Batch verification with proper ID mapping
             suggestions = verify_signatures_batch(
                 signatures,
                 query,
@@ -1567,7 +1730,171 @@ def render_layer4_verification_fixed(query):
             st.rerun()
     
     else:
-        st.info("Verification disabled")
+        st.info("Batch verification disabled")
+
+
+def render_layer4_debate_verification(query):
+    """NEW: Multi-round debate verification"""
+    
+    st.markdown("#### 🗣️ Multi-Round AI Debate System")
+    
+    st.markdown("""
+    <div style='background: linear-gradient(135deg, rgba(255, 107, 157, 0.1), rgba(255, 93, 143, 0.1)); 
+                padding: 1.2rem; border-radius: 12px; margin: 1rem 0; 
+                border-left: 4px solid #FF6B9D;'>
+    <strong>✨ Database-Grounded Evidence + 3 Expert LLMs</strong><br><br>
+    Three LLMs (Qwen, Zephyr, Phi-3) debate signature quality with evidence from:<br>
+    • Gene-Gene network (2.1M probabilities)<br>
+    • Gene-Pathway network (2.1M probabilities)<br>
+    • GTEx expression (47K genes)<br>
+    • Gene evidence database (10K genes)
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Debate configuration
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        num_rounds = material_slider(
+            "Number of rounds",
+            min_value=1,
+            max_value=20,
+            value=10,
+            step=1,
+            help="More rounds = more thorough but slower",
+            key="debate_rounds"
+        )
+        st.session_state.debate_num_rounds = num_rounds
+    
+    with col2:
+        convergence_threshold = material_slider(
+            "Convergence threshold",
+            min_value=0.5,
+            max_value=1.0,
+            value=0.85,
+            step=0.05,
+            help="Stop when models agree this much",
+            key="debate_convergence"
+        )
+    
+    # Initialize enhanced DB client
+    if material_button("🔌 Initialize Database Connection", use_container_width=True, key="init_db"):
+        with st.spinner("Connecting to database API..."):
+            if initialize_enhanced_db_client():
+                st.success("✅ Database client ready!")
+            else:
+                st.error("❌ Failed to initialize database client")
+    
+    # Run debate button
+    if material_button("🗣️ Start Multi-Round Debate", type="primary", use_container_width=True, key="run_debate"):
+        
+        if not initialize_enhanced_db_client():
+            st.error("Please initialize database connection first")
+            return
+        
+        timing = LayerTiming("Layer 4: Multi-Round Debate", time.time())
+        
+        signatures = [st.session_state.signature_cache[sid] for sid in st.session_state.signature_ids]
+        
+        # Collect all genes
+        all_genes = []
+        for sig in signatures:
+            all_genes.extend(sig.genes)
+        all_genes = list(set(all_genes))
+        
+        st.info(f"🧬 Running debate on {len(all_genes)} unique genes from {len(signatures)} signatures...")
+        
+        # Get tissue context
+        bio_context = st.session_state.get('bio_context')
+        tissue_context = bio_context['tissue'] if bio_context else None
+        
+        # Run debate
+        with st.spinner(f"Running {num_rounds}-round debate..."):
+            result = run_validation_debate_sync(
+                genes=all_genes,
+                tissue_context=tissue_context,
+                max_rounds=num_rounds
+            )
+        
+        if result:
+            timing.end_time = time.time()
+            st.session_state.layer_timings.append(timing)
+            st.session_state.current_debate_result = result
+            st.session_state.debate_history.append(result)
+            
+            st.success(f"✅ Debate complete! ({result.total_rounds} rounds, {result.convergence_rate:.1%} convergence)")
+            st.markdown(f'<span class="timing-badge">⏱️ {timing.duration_str}</span>', unsafe_allow_html=True)
+            
+            time.sleep(1)
+            st.rerun()
+    
+    # Show debate results
+    if st.session_state.current_debate_result:
+        st.markdown("---")
+        st.markdown("### 💬 Debate Conversation")
+        
+        result = st.session_state.current_debate_result
+        
+        # Scrollable container for debate
+        with st.container():
+            for debate_round in result.all_rounds:
+                # Round separator
+                render_round_separator(
+                    round_num=debate_round.round_num,
+                    total_rounds=result.total_rounds
+                )
+                
+                # Convergence indicator
+                render_convergence_indicator(debate_round.convergence_rate)
+                
+                # Messages
+                for msg in debate_round.messages:
+                    render_chat_message(
+                        speaker=msg.speaker,
+                        message=msg.message,
+                        db_sources=msg.db_sources if msg.db_sources else []
+                    )
+        
+        # Final consensus
+        st.markdown("---")
+        st.markdown("### 🎯 Final Consensus")
+        
+        consensus_text = f"""
+**Decision:** {result.final_decision.upper()}
+
+**Affected Genes:** {', '.join(result.affected_genes) if result.affected_genes else 'None'}
+
+**Confidence:** {result.confidence:.2%}
+
+**Convergence:** {result.convergence_rate:.2%}
+
+**Total Rounds:** {result.total_rounds}
+"""
+        
+        render_chat_message(
+            speaker="consensus",
+            message=consensus_text,
+            db_sources=[]
+        )
+        
+        # Apply recommendations
+        if result.final_decision == "remove" and result.affected_genes:
+            st.markdown("---")
+            
+            if material_button("✂️ Apply Recommendations (Remove Flagged Genes)", type="primary", use_container_width=True, key="apply_debate"):
+                genes_to_remove = set(result.affected_genes)
+                
+                # Update all signatures
+                signatures = [st.session_state.signature_cache[sid] for sid in st.session_state.signature_ids]
+                
+                for sig in signatures:
+                    sig.genes = [g for g in sig.genes if g not in genes_to_remove]
+                    sig.debate_verified = True
+                    st.session_state.signature_cache[sig.signature_id] = sig
+                
+                st.success(f"✅ Removed {len(genes_to_remove)} genes from all signatures")
+                time.sleep(1)
+                st.rerun()
 
 
 # ============================================================
@@ -1578,7 +1905,7 @@ def render_layer5_approval_text_based():
     """Layer 5: Text-based clickable gene selection"""
     
     st.markdown("---")
-    st.markdown("### 👤 Layer 5: Review & Approve (Text-Based)")
+    st.markdown("### 👤 Layer 5: Review & Approve")
     
     if not st.session_state.signature_ids:
         return
@@ -1606,6 +1933,9 @@ def render_layer5_approval_text_based():
             
             if sig.dam_expanded:
                 st.caption("🔬 DAM Expanded")
+            
+            if sig.debate_verified:
+                st.caption("🗣️ Debate Verified")
             
             sig_suggestions = llm2_suggestions.get(sig.signature_id, {})
             
@@ -1725,6 +2055,8 @@ def render_layer5_approval_text_based():
                     desc += "|DAM"
                 if sig.llm2_verified:
                     desc += "|LLM2"
+                if sig.debate_verified:
+                    desc += "|DEBATE"
                 genes = '\t'.join(sig.genes)
                 gmt_lines.append(f"{sig_id}\t{desc}\t{genes}")
             
@@ -1739,17 +2071,28 @@ def render_layer5_approval_text_based():
             )
         
         with col2:
-            # NEW: Include mode + context in export
+            # Include mode + context + debate results in export
             results = {
                 'query': st.session_state.get('main_query', ''),
-                'generation_mode': st.session_state.get('generation_mode', 'exploratory'),  # NEW!
-                'biological_context': st.session_state.get('bio_context'),  # NEW!
+                'generation_mode': st.session_state.get('generation_mode', 'exploratory'),
+                'biological_context': st.session_state.get('bio_context'),
+                'verification_method': st.session_state.get('verification_method', 'batch'),
                 'signatures': [sig.to_dict() for sig in approved_sigs],
                 'total_signatures': len(approved_sigs),
                 'timestamp': datetime.now().isoformat(),
                 'layer_timings': {t.layer_name: t.duration_str for t in st.session_state.layer_timings},
-                'pipeline_version': '2.1-publication-grade',  # NEW: Updated version
+                'pipeline_version': '2.2-debate-system',
             }
+            
+            # Add debate results if available
+            if st.session_state.current_debate_result:
+                results['debate_summary'] = {
+                    'total_rounds': st.session_state.current_debate_result.total_rounds,
+                    'final_decision': st.session_state.current_debate_result.final_decision,
+                    'affected_genes': st.session_state.current_debate_result.affected_genes,
+                    'confidence': st.session_state.current_debate_result.confidence,
+                    'convergence_rate': st.session_state.current_debate_result.convergence_rate
+                }
             
             st.download_button(
                 "📥 Download JSON",
@@ -1766,7 +2109,7 @@ def render_layer5_approval_text_based():
 
 def main():
     st.set_page_config(
-        page_title="Signature Generator - Publication Grade",
+        page_title="Signature Generator - With Debate System",
         page_icon="🧬",
         layout="wide"
     )
@@ -1778,7 +2121,7 @@ def main():
     <div style='text-align: center; padding: 32px 0 16px 0;'>
         <h1>🧬 Signature Generator</h1>
         <p style='font-size: 1.1rem; color: #616161;'>
-            Publication-Grade • All Fixes Applied • Remote DAM • Material UI
+            Publication-Grade • Multi-Round Debate • Database-Grounded Evidence
         </p>
     </div>
     """, unsafe_allow_html=True)
