@@ -49,6 +49,7 @@ import hashlib
 import pickle
 import asyncio
 import nest_asyncio
+from openai import OpenAI  # NEW: For Groq API
 
 # Original imports
 from db_client import DatabaseClient
@@ -544,15 +545,20 @@ def fast_semantic_search(
 def decompose_with_granularity(
     query: str,
     granularity_count: int,
-    hf_token: str
+    groq_api_key: str
 ) -> Optional[DecompositionResult]:
-    """Use Qwen2.5-72B to decompose query into EXACTLY N mechanisms"""
-    
+    """Use Groq's Llama 3.3 70B to decompose query into EXACTLY N mechanisms"""
+
     try:
-        from huggingface_hub import InferenceClient
-        
-        client = InferenceClient(token=hf_token)
-        
+        # Use OpenAI client with Groq base URL
+        client = OpenAI(
+            api_key=groq_api_key,
+            base_url="https://api.groq.com/openai/v1"
+        )
+
+        # Use Llama 3.3 70B - Groq's most capable model
+        model = "llama-3.3-70b-versatile"
+
         prompt = f"""Decompose this biological query into EXACTLY {granularity_count} SPECIFIC, NON-OVERLAPPING molecular mechanisms.
 
 Query: "{query}"
@@ -575,13 +581,13 @@ Output JSON ONLY (no preamble, no markdown):
   ]
 }}"""
 
-        response = client.chat_completion(
+        response = client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
-            model="Qwen/Qwen2.5-72B-Instruct",
+            model=model,
             max_tokens=3000,
             temperature=0.3
         )
-        
+
         raw = response.choices[0].message.content
         
         # Parse JSON
@@ -600,16 +606,16 @@ Output JSON ONLY (no preamble, no markdown):
         
         data = json.loads(cleaned)
         facets = data.get('facets', [])
-        
+
         return DecompositionResult(
             facets=facets,
             granularity_level=granularity_count,
             timestamp=datetime.now().isoformat(),
-            llm_model="Qwen/Qwen2.5-72B-Instruct"
+            llm_model=model  # Use the Groq model name
         )
-        
+
     except Exception as e:
-        st.error(f"LLM decomposition failed: {e}")
+        st.error(f"Groq decomposition failed: {e}")
         return None
 
 
@@ -618,26 +624,32 @@ def verify_signatures_batch(
     original_query: str,
     mode: str,
     llm2_model: str,
-    hf_token: str,
+    groq_api_key: str,
     context_options: List[str],
     batch_size: int = 5
 ) -> Dict[str, Any]:
     """
     FIX D: Batch verification with proper signature ID mapping
     NEW: Context-aware verification for publication mode
-    
+
     Args:
         batch_size: Number of signatures per API call
-        
+
     Returns:
         Dict[signature_id, verification_result]
     """
-    
+
     all_suggestions = {}
-    
+
     try:
-        from huggingface_hub import InferenceClient
-        client = InferenceClient(token=hf_token)
+        # Use OpenAI client with Groq
+        client = OpenAI(
+            api_key=groq_api_key,
+            base_url="https://api.groq.com/openai/v1"
+        )
+
+        # Use Llama 3.3 70B for verification (best quality)
+        model_id = "llama-3.3-70b-versatile"
         
         # NEW: Get biological context if available
         bio_context = st.session_state.get('bio_context')
@@ -716,14 +728,14 @@ If no changes needed, return empty lists."""
             try:
                 # FIX E: Add LLM logging
                 st.caption(f"🔄 Batch {batch_idx+1}/{num_batches}: Verifying {len(batch)} signatures...")
-                
-                response = client.chat_completion(
+
+                response = client.chat.completions.create(
                     messages=[{"role": "user", "content": prompt}],
-                    model=llm2_model,
+                    model=model_id,
                     max_tokens=2000,
                     temperature=0.2
                 )
-                
+
                 raw = response.choices[0].message.content
                 
                 # Parse JSON
@@ -788,10 +800,11 @@ def run_validation_debate_sync(
         return None
     
     try:
-        # Initialize debate engine
+        # Initialize debate engine with Groq API
         debate_engine = MultiRoundDebateEngine(
-            hf_token=st.session_state.hf_token,
-            db_client=st.session_state.db_client_enhanced
+            api_key=st.session_state.groq_api_key,
+            db_client=st.session_state.db_client_enhanced,
+            base_url="https://api.groq.com/openai/v1"
         )
         
         # Run async debate
@@ -838,11 +851,11 @@ def initialize_enhanced_db_client():
 def initialize_session_state():
     """Initialize session state with proper defaults"""
     defaults = {
-        'hf_token': None,
+        'groq_api_key': None,       # NEW: Groq API key
         'token_validated': False,
         'token_error': False,  # FIX B: Add explicit error flag
         'kb_loaded': False,
-        
+
         # NEW: Publication-grade settings
         'generation_mode': 'exploratory',  # 'exploratory' or 'publication'
         'bio_context': None,
@@ -918,38 +931,43 @@ def render_sidebar():
     """Render sidebar with token input and timing info"""
     with st.sidebar:
         st.markdown("### 🔧 Configuration")
-        
-        with st.expander("🔑 HuggingFace Token", expanded=not st.session_state.token_validated):
-            st.caption("One token for both LLMs")
-            
-            token_input = st.text_input(
-                "HF Token",
+
+        with st.expander("🔑 Groq API Key", expanded=not st.session_state.token_validated):
+            st.caption("Get your free API key at console.groq.com")
+
+            key_input = st.text_input(
+                "Groq API Key",
                 type="password",
-                value=st.session_state.hf_token or "",
-                help="Get at huggingface.co/settings/tokens"
+                value=st.session_state.groq_api_key or "",
+                help="Free tier available at console.groq.com"
             )
-            
-            if st.button("Validate Token"):
+
+            if st.button("Validate Key"):
                 try:
-                    from huggingface_hub import InferenceClient
-                    InferenceClient(token=token_input)
-                    st.session_state.hf_token = token_input
+                    # Test Groq connection
+                    client = OpenAI(
+                        api_key=key_input,
+                        base_url="https://api.groq.com/openai/v1"
+                    )
+                    # Simple test call to verify the key works
+                    client.models.list()
+                    st.session_state.groq_api_key = key_input
                     st.session_state.token_validated = True
-                    st.session_state.token_error = False  # FIX B: Clear error
+                    st.session_state.token_error = False
                     st.rerun()
-                except Exception:
+                except Exception as e:
                     st.session_state.token_validated = False
-                    st.session_state.token_error = True  # FIX B: Set error
-                    st.session_state.hf_token = None  # FIX B: Clear bad token
+                    st.session_state.token_error = True
+                    st.session_state.groq_api_key = None
                     st.rerun()
         
         # FIX B: Proper state display with normalized flags
         if st.session_state.token_error and not st.session_state.token_validated:
-            st.error("❌ Invalid token")
+            st.error("❌ Invalid API key")
         elif st.session_state.token_validated and not st.session_state.token_error:
-            st.success("🔓 Token Active")
+            st.success("✅ Connected to Groq!")
         else:
-            st.info("🔑 Enter token and click Validate")
+            st.info("🔑 Enter API key and click Validate")
         
         st.markdown("---")
         
@@ -1028,7 +1046,7 @@ def render_generation_tab():
         return
     
     if not st.session_state.token_validated:
-        st.warning("⚠️ Please validate HuggingFace token")
+        st.warning("⚠️ Please validate Groq API key in the sidebar")
         return
     
     # ============================================================
@@ -1289,7 +1307,7 @@ def render_layer1_granularity(query, target_count, min_genes, max_genes):
                 result = decompose_with_granularity(
                     query,
                     granularity_level,
-                    st.session_state.hf_token
+                    st.session_state.groq_api_key
                 )
                 
                 if result and result.facets:
@@ -1723,11 +1741,12 @@ def render_layer4_standard_verification(query):
     )
     
     if verification_mode != "None":
-        
+
         llm2_model = st.selectbox(
             "Model:",
-            ["stanford-crfm/BioMedLM", "microsoft/BioGPT-Large"],
-            key="llm2_model"
+            ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "gemma2-9b-it"],
+            key="llm2_model",
+            help="Select Groq model for verification"
         )
         
         context_options = st.multiselect(
@@ -1757,7 +1776,7 @@ def render_layer4_standard_verification(query):
                 query,
                 mode,
                 llm2_model,
-                st.session_state.hf_token,
+                st.session_state.groq_api_key,
                 context_options,
                 batch_size=batch_size
             )

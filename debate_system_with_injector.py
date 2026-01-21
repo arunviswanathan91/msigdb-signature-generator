@@ -1,8 +1,8 @@
 """
-Multi-Round Debate System with Database Injector
-=================================================
+Multi-Round Debate System with Database Injector (GROQ EDITION)
+================================================================
 
-Version: 1.0.0
+Version: 2.0.0 - Migrated to Groq API
 
 Orchestrates debates between 3 LLMs with database grounding for:
 1. Signature Validation: Debate whether to REMOVE genes
@@ -14,6 +14,7 @@ Features:
 - Weighted voting by confidence
 - Convergence tracking
 - Conversational output formatting
+- Groq API for ultra-fast inference
 """
 
 import asyncio
@@ -22,6 +23,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 import re
 import time
+from openai import AsyncOpenAI  # CHANGED: Use OpenAI Client for Groq
 
 
 class DebateMode(Enum):
@@ -131,7 +133,7 @@ class DatabaseInjector:
 class MultiRoundDebateEngine:
     """
     Orchestrates multi-round debates with database grounding.
-    
+
     Architecture:
     1. Round 1: Injector provides initial database context
     2. LLMs debate based on context
@@ -139,30 +141,37 @@ class MultiRoundDebateEngine:
     4. LLMs refine positions
     5. Meta-synthesizer makes final decision
     """
-    
+
     def __init__(
         self,
-        hf_token: str,
+        api_key: str,
         db_client,
+        base_url: str = "https://api.groq.com/openai/v1",
         model_configs: Optional[Dict] = None
     ):
         """
         Args:
-            hf_token: HuggingFace API token
+            api_key: Groq API key
             db_client: DatabaseClientEnhanced instance
+            base_url: Groq API base URL (default: https://api.groq.com/openai/v1)
             model_configs: Optional dict of model parameters
         """
-        self.hf_token = hf_token
+        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
         self.db_client = db_client
         self.injector = DatabaseInjector(db_client)
-        
-        # Default models
+
+        # GROQ MODELS MAPPING
+        # Using different Groq models for diverse perspectives in debate
         self.models = {
-            "qwen": "Qwen/Qwen2.5-7B-Instruct",
-            "zephyr": "HuggingFaceH4/zephyr-7b-beta",
-            "phi": "microsoft/Phi-3-mini-4k-instruct"
+            "qwen": "llama-3.3-70b-versatile",    # Smartest, most capable
+            "zephyr": "llama-3.1-8b-instant",     # Fast and creative
+            "phi": "gemma2-9b-it"                 # Alternative perspective
         }
-        
+
+        # Override with custom configs if provided
+        if model_configs:
+            self.models.update(model_configs)
+
         # Model reliability weights (can be tuned)
         self.reliability_weights = {
             "qwen": 1.2,
@@ -434,21 +443,20 @@ class MultiRoundDebateEngine:
         conversation_history: List[Dict]
     ) -> str:
         """
-        Async LLM query via HuggingFace Inference API.
+        Async LLM query via Groq API (OpenAI-compatible).
         """
-        from huggingface_hub import InferenceClient
-        
-        client = InferenceClient(token=self.hf_token)
-        
-        # Call LLM
-        response = client.chat_completion(
-            messages=conversation_history,
-            model=model_id,
-            max_tokens=500,
-            temperature=0.7
-        )
-        
-        return response.choices[0].message.content
+        try:
+            # Call Groq API via AsyncOpenAI client
+            response = await self.client.chat.completions.create(
+                model=model_id,
+                messages=conversation_history,
+                max_tokens=500,
+                temperature=0.7
+            )
+
+            return response.choices[0].message.content
+        except Exception as e:
+            return f"Error ({model_name}): {str(e)}"
     
     def _build_validation_prompt(self, genes: List[str], round_num: int) -> str:
         """Build prompt for validation round"""
