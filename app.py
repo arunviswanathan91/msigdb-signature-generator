@@ -1555,7 +1555,19 @@ def render_layer2_semantic_fixed(query, target_count, min_genes, max_genes):
             )
             
             status.success(f"✅ Loaded {len(pathway_embeddings):,} pathway embeddings")
-            
+
+            # Initialize cache client
+            status.info("🔌 Connecting to cache server...")
+            cache_client = SearchCacheClient(
+                api_url="https://arunviswanathan91-msigdb-api.hf.space"
+            )
+
+            # Track cache statistics
+            total_searches = 0
+            cache_hits = 0
+
+            status.success("✅ Cache client ready")
+
             progress_bar.progress(40)
             status.info("🧬 Building signatures with TRUE diversity...")
             
@@ -1590,15 +1602,23 @@ def render_layer2_semantic_fixed(query, target_count, min_genes, max_genes):
                 
                 for query_idx, mech_query in enumerate(mechanism_queries):
                     status.info(f"   🔍 Searching: {facet_name} (Query {query_idx+1}/{len(mechanism_queries)})")
-                    
-                    rp, ps = fast_semantic_search(
-                        mech_query,
-                        pathway_embeddings,
-                        pathways_dict,
-                        embedding_model,
+
+                    # Use cache-aware search
+                    rp, ps, was_cached = cache_client.search_with_cache(
+                        query=mech_query,
+                        facet_name=facet_name,
+                        mechanism_name=mech_query,
+                        embedding_model=embedding_model,
+                        pathway_embeddings=pathway_embeddings,
+                        pathways_dict=pathways_dict,
                         top_k=50
                     )
-                    
+
+                    # Track cache performance
+                    total_searches += 1
+                    if was_cached:
+                        cache_hits += 1
+
                     if rp:
                         facet_pathways_dict.update(rp)
                         for pid, score in ps.items():
@@ -1622,7 +1642,15 @@ def render_layer2_semantic_fixed(query, target_count, min_genes, max_genes):
                 
                 progress = 40 + int((i + 1) / len(selected_facets) * 50)
                 progress_bar.progress(progress)
-            
+
+            # Display cache performance
+            if total_searches > 0:
+                cache_hit_rate = (cache_hits / total_searches * 100)
+                if cache_hits > 0:
+                    st.success(f"📊 Cache Performance: {cache_hits}/{total_searches} hits ({cache_hit_rate:.1f}%)")
+                else:
+                    st.info(f"📊 Cache Performance: 0/{total_searches} hits (all new queries cached for future use)")
+
             # Trim to exact target (should be close already)
             if len(all_signatures) > target_count:
                 all_signatures.sort(key=lambda s: s.confidence, reverse=True)
