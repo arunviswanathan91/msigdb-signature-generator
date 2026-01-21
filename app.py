@@ -53,6 +53,7 @@ from openai import OpenAI  # NEW: For Groq API
 
 # Original imports
 from db_client import DatabaseClient
+from cache_client import SearchCacheClient
 
 def inject_minimal_styles():
     """Minimal styling that respects Streamlit's default UI"""
