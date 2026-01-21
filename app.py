@@ -117,6 +117,15 @@ def render_debate_message_simple(speaker: str, message: str, db_sources: list = 
     """, unsafe_allow_html=True)
 # NEW: Debate system imports
 try:
+    import importlib
+    import sys
+
+    # Force reload of debate system modules to avoid caching issues
+    if 'debate_system_with_injector' in sys.modules:
+        importlib.reload(sys.modules['debate_system_with_injector'])
+    if 'db_client_enhanced' in sys.modules:
+        importlib.reload(sys.modules['db_client_enhanced'])
+
     from db_client_enhanced import DatabaseClientEnhanced
     from debate_system_with_injector import (
         MultiRoundDebateEngine,
@@ -124,7 +133,17 @@ try:
         DebateResult
     )
 
-    DEBATE_SYSTEM_AVAILABLE = True
+    # Validate that we have the correct version (Groq API with api_key parameter)
+    import inspect
+    sig = inspect.signature(MultiRoundDebateEngine.__init__)
+    params = list(sig.parameters.keys())
+    if 'api_key' not in params:
+        print(f"⚠️  WARNING: MultiRoundDebateEngine has old signature: {params}")
+        print("Expected 'api_key' parameter but found old 'hf_token' parameter.")
+        print("This indicates a module caching issue. Please restart the Streamlit app.")
+        DEBATE_SYSTEM_AVAILABLE = False
+    else:
+        DEBATE_SYSTEM_AVAILABLE = True
 except ImportError as e:
     DEBATE_SYSTEM_AVAILABLE = False
     print(f"Debate system not available: {e}")
