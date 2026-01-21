@@ -334,7 +334,7 @@ class SignatureBuilder:
     def __init__(self, min_genes: int = 10, max_genes: int = 20):
         self.min_genes = min_genes
         self.max_genes = max_genes
-        self.seen_gene_sets: Set[str] = set()  # For deduplication
+        self.seen_signatures: List[Set[str]] = []  # For deduplication using Jaccard
     
     def build_signature_from_pathways(
         self,
@@ -382,7 +382,27 @@ class SignatureBuilder:
         
         # NEW: Check minimum AFTER filtering
         if len(selected_genes) < self.min_genes:
-            return None
+            # FIX: Backfill if filtering dropped below minimum
+            current_set = set(selected_genes)
+            removed_set = set(removed_hk)
+            
+            for gene, score in ranked_genes:
+                if len(selected_genes) >= self.min_genes:
+                    break
+                
+                if gene not in current_set and gene not in removed_set:
+                    # Double check it isn't a housekeeping gene we missed (redundant but safe)
+                    is_hk = False
+                    if gene in HOUSEKEEPING_GENES: 
+                        is_hk = True
+                    
+                    if not is_hk:
+                        selected_genes.append(gene)
+                        current_set.add(gene)
+            
+            # If still not enough, return None
+            if len(selected_genes) < self.min_genes:
+                return None
         
         # Rebuild scores dict with filtered genes
         scores_dict = {gene: score for gene, score in selected_pairs if gene in selected_genes}
@@ -493,17 +513,27 @@ class SignatureBuilder:
     
     def _is_unique_signature(self, sig: GeneSignature) -> bool:
         """
-        FIX C: Signature deduplication
-        Check if gene set is unique before adding
+        FIX C: Signature deduplication using Jaccard Similarity
+        Allow up to 80% overlap (Jaccard similarity < 0.8)
         """
-        gene_hash = sig.gene_set_hash()
+        new_gene_set = set(sig.genes)
         
-        if gene_hash in self.seen_gene_sets:
-            return False
+        for seen_set in self.seen_signatures:
+            intersection = len(new_gene_set.intersection(seen_set))
+            union = len(new_gene_set.union(seen_set))
+            
+            if union == 0:
+                continue
+                
+            jaccard = intersection / union
+            
+            # If too similar (high overlap), reject as duplicate
+            if jaccard > 0.8:  # 80% similarity threshold
+                return False
         
-        self.seen_gene_sets.add(gene_hash)
+        self.seen_signatures.append(new_gene_set)
         return True
-    
+
     def _make_id(self, name: str) -> str:
         return name.upper().replace(' ', '_').replace('-', '_').replace('/', '_')
 
@@ -1500,11 +1530,14 @@ def render_layer2_semantic_fixed(query, target_count, min_genes, max_genes):
                 mechanism_queries = facet.get('mechanism_queries', [facet_name])
                 
                 # FIX ROOT CAUSE #1: Use ALL queries, not just [:1]
+                # Aggregate pathways from ALL queries first (Fix for Diversity Loss)
+                facet_pathways_dict = {}
+                facet_similarities = {}
+                
                 for query_idx, mech_query in enumerate(mechanism_queries):
                     status.info(f"   🔍 Searching: {facet_name} (Query {query_idx+1}/{len(mechanism_queries)})")
                     
-                    # Semantic search
-                    relevant_pathways, pathway_similarities = fast_semantic_search(
+                    rp, ps = fast_semantic_search(
                         mech_query,
                         pathway_embeddings,
                         pathways_dict,
@@ -1512,22 +1545,25 @@ def render_layer2_semantic_fixed(query, target_count, min_genes, max_genes):
                         top_k=50
                     )
                     
-                    if not relevant_pathways:
-                        continue
-                    
-                    # FIX ROOT CAUSE #2: Dynamic variants
+                    if rp:
+                        facet_pathways_dict.update(rp)
+                        for pid, score in ps.items():
+                            facet_similarities[pid] = max(facet_similarities.get(pid, 0.0), score)
+
+                if facet_pathways_dict:
+                    # Fix variants calculation
                     num_variants = variants_per_mechanism
-                    if i < remainder:  # Give extra signature to first N mechanisms
+                    if i < remainder:
                         num_variants += 1
-                    
+                        
+                    # Build diverse mechanisms from the aggregated pool
                     mechanism_sigs = builder.build_multiple_mechanisms_dynamic(
                         facet_name,
-                        relevant_pathways,
-                        pathway_similarities,
+                        facet_pathways_dict,
+                        facet_similarities,
                         num_variants=num_variants
                     )
                     
-                    # FIX C: Deduplication happens in builder
                     all_signatures.extend(mechanism_sigs)
                 
                 progress = 40 + int((i + 1) / len(selected_facets) * 50)
@@ -2044,7 +2080,7 @@ def render_layer5_approval_text_based():
                     
                     with cols[col_idx]:
                         # Button styled as text
-                        button_key = f"gene_{sig.signature_id}_{gene}"
+                        button_key = f"gene_{sig.signature_id}_{gene}_{row_idx}_{col_idx}"
                         
                         if is_selected and not is_flagged:
                             label = f"**{gene}**"

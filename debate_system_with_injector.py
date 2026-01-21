@@ -465,9 +465,15 @@ class MultiRoundDebateEngine:
 
 Based on the database analysis above, which genes (if any) should be REMOVED from this signature?
 
+IMPORTANT:
+1. The database evidence is a strong signal, but NOT absolute truth.
+2. If you have strong biological reasoning to disagree with the database (e.g., context-specific expression), please do so.
+3. You may also suggest removing genes NOT flagged by the database if they are biologically irrelevant.
+4. DO NOT HALLUCINATE: Base all claims on verifying real biological mechanisms.
+
 Provide:
 1. List of genes to remove (if any)
-2. Reasoning for each
+2. Reasoning for each (Cite mechanism/evidence)
 3. Your confidence (0-1)
 
 Format: Gene: REASON (confidence: X)"""
@@ -482,6 +488,11 @@ Provide updated recommendations with confidence scores."""
             return f"""You are an expert bioinformatician evaluating whether to ADD {candidate_gene} to an existing signature.
 
 Based on the database analysis above, should we ADD this gene?
+
+IMPORTANT:
+1. Critically evaluate the database evidence.
+2. If you have complementary evidence (pathway connections, co-expression) that supports addition despite weak DB signal, argue for it.
+3. DO NOT HALLUCINATE: Only cite real interactions.
 
 Vote: ADD or REJECT
 Reasoning: Why?
