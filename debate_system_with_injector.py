@@ -147,7 +147,9 @@ class MultiRoundDebateEngine:
         api_key: str,
         db_client,
         base_url: str = "https://api.groq.com/openai/v1",
-        model_configs: Optional[Dict] = None
+        model_configs: Optional[Dict] = None,
+        validate_models: bool = True,
+        use_json_mode: bool = False
     ):
         """
         Args:
@@ -155,10 +157,13 @@ class MultiRoundDebateEngine:
             db_client: DatabaseClientEnhanced instance
             base_url: Groq API base URL (default: https://api.groq.com/openai/v1)
             model_configs: Optional dict of model parameters
+            validate_models: Whether to validate model availability on init (default: True)
+            use_json_mode: Use structured JSON outputs for better parsing (default: False)
         """
         self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
         self.db_client = db_client
         self.injector = DatabaseInjector(db_client)
+        self.use_json_mode = use_json_mode
 
         # GROQ MODELS MAPPING
         # Using different Groq models for diverse perspectives in debate
@@ -178,7 +183,73 @@ class MultiRoundDebateEngine:
             "zephyr": 1.0,
             "phi": 0.9
         }
-    
+
+        # ✅ FIX BUG #2: Validate model availability
+        if validate_models:
+            self._validate_model_availability()
+
+    def _validate_model_availability(self):
+        """
+        Validate that configured models exist in Groq.
+
+        Prints warnings for unavailable models but doesn't block initialization.
+        This allows the system to start even if some models are unavailable.
+        """
+        try:
+            # Note: models.list() is synchronous in the OpenAI SDK
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+            # Create a temporary sync client for validation
+            from openai import OpenAI
+            sync_client = OpenAI(
+                api_key=self.client.api_key,
+                base_url=self.client.base_url
+            )
+
+            models_response = sync_client.models.list()
+            available_model_ids = {model.id for model in models_response.data}
+
+            print("🔍 Validating Groq models...")
+            print(f"   Found {len(available_model_ids)} available models")
+
+            # Check each configured model
+            unavailable = []
+            for role, model_id in self.models.items():
+                if model_id in available_model_ids:
+                    print(f"   ✅ {role}: {model_id}")
+                else:
+                    print(f"   ❌ {role}: {model_id} (NOT FOUND)")
+                    unavailable.append((role, model_id))
+
+            # Suggest alternatives for unavailable models
+            if unavailable:
+                print("\n⚠️  WARNING: Some models are unavailable!")
+                print("Available Groq models:")
+                for model_id in sorted(available_model_ids):
+                    print(f"   • {model_id}")
+
+                print("\n💡 Suggested fixes:")
+                for role, model_id in unavailable:
+                    # Find similar models
+                    if 'gemma' in model_id.lower():
+                        alternatives = [m for m in available_model_ids if 'gemma' in m.lower()]
+                    elif 'llama' in model_id.lower():
+                        alternatives = [m for m in available_model_ids if 'llama' in m.lower()]
+                    else:
+                        alternatives = list(available_model_ids)[:3]
+
+                    if alternatives:
+                        print(f"   {role}: Try '{alternatives[0]}' instead of '{model_id}'")
+
+                print("\nDebates may fail with unavailable models. Update model_configs or use:")
+                print("  python groq_model_diagnostic.py <your_api_key>")
+
+        except Exception as e:
+            print(f"⚠️  Could not validate models: {e}")
+            print("Continuing without validation...")
+
     async def run_validation_debate(
         self,
         genes: List[str],
@@ -364,7 +435,7 @@ class MultiRoundDebateEngine:
         
         # Query all LLMs in parallel
         tasks = [
-            self._query_llm_async(model_name, model_id, history)
+            self._query_llm_async(model_name, model_id, history, use_json=self.use_json_mode)
             for model_name, model_id in self.models.items()
         ]
         
@@ -414,54 +485,109 @@ class MultiRoundDebateEngine:
         })
         
         tasks = [
-            self._query_llm_async(model_name, model_id, history)
+            self._query_llm_async(model_name, model_id, history, use_json=self.use_json_mode)
             for model_name, model_id in self.models.items()
         ]
-        
+
         responses = await asyncio.gather(*tasks, return_exceptions=True)
-        
+
         messages = []
         for model_name, response in zip(self.models.keys(), responses):
             if isinstance(response, Exception):
+                print(f"⚠️ {model_name} failed in expansion debate: {response}")
                 continue
-            
+
             confidence = self._extract_confidence(response)
-            
+
             messages.append(DebateMessage(
                 round_num=round_num,
                 speaker=model_name,
                 message=response,
                 confidence=confidence
             ))
-        
+
         return messages
     
     async def _query_llm_async(
         self,
         model_name: str,
         model_id: str,
-        conversation_history: List[Dict]
+        conversation_history: List[Dict],
+        use_json: bool = False
     ) -> str:
         """
         Async LLM query via Groq API (OpenAI-compatible).
+
+        Args:
+            model_name: Human-readable model name (qwen, zephyr, phi)
+            model_id: Groq model ID
+            conversation_history: Chat messages
+            use_json: Force JSON output format (requires JSON prompt)
+
+        Raises:
+            RuntimeError: If the model query fails
         """
         try:
+            # Prepare API call parameters
+            api_params = {
+                "model": model_id,
+                "messages": conversation_history,
+                "max_tokens": 500,
+                "temperature": 0.7
+            }
+
+            # Add JSON mode if enabled (requires supported models)
+            if use_json:
+                api_params["response_format"] = {"type": "json_object"}
+
             # Call Groq API via AsyncOpenAI client
-            response = await self.client.chat.completions.create(
-                model=model_id,
-                messages=conversation_history,
-                max_tokens=500,
-                temperature=0.7
-            )
+            response = await self.client.chat.completions.create(**api_params)
 
             return response.choices[0].message.content
         except Exception as e:
-            return f"Error ({model_name}): {str(e)}"
+            # ✅ FIX: Raise exception instead of returning error string
+            # This ensures proper error detection in the calling code
+            raise RuntimeError(f"Model {model_name} ({model_id}) failed: {str(e)}")
     
     def _build_validation_prompt(self, genes: List[str], round_num: int) -> str:
         """Build prompt for validation round"""
-        if round_num == 1:
-            return f"""You are an expert bioinformatician reviewing a gene signature with {len(genes)} genes.
+        if self.use_json_mode:
+            # JSON mode prompt
+            if round_num == 1:
+                return f"""You are an expert bioinformatician reviewing a gene signature with {len(genes)} genes.
+
+Based on the database analysis above, which genes (if any) should be REMOVED from this signature?
+
+IMPORTANT:
+1. The database evidence is a strong signal, but NOT absolute truth.
+2. If you have strong biological reasoning to disagree with the database, please do so.
+3. You may also suggest removing genes NOT flagged by the database if biologically irrelevant.
+4. DO NOT HALLUCINATE: Base all claims on real biological mechanisms.
+
+Respond with JSON ONLY in this exact format:
+{{
+  "genes_to_remove": ["GENE1", "GENE2"],
+  "reasoning": {{
+    "GENE1": "specific biological reason",
+    "GENE2": "specific biological reason"
+  }},
+  "confidence": 0.85
+}}
+
+If no genes should be removed, use empty array: {{"genes_to_remove": [], "reasoning": {{}}, "confidence": 0.9}}"""
+            else:
+                return f"""Round {round_num}: Continue the debate. Have your colleagues changed your mind?
+
+Provide updated recommendations in JSON format:
+{{
+  "genes_to_remove": ["GENE1", "GENE2"],
+  "reasoning": {{"GENE1": "reason", "GENE2": "reason"}},
+  "confidence": 0.85
+}}"""
+        else:
+            # Original text mode
+            if round_num == 1:
+                return f"""You are an expert bioinformatician reviewing a gene signature with {len(genes)} genes.
 
 Based on the database analysis above, which genes (if any) should be REMOVED from this signature?
 
@@ -477,8 +603,8 @@ Provide:
 3. Your confidence (0-1)
 
 Format: Gene: REASON (confidence: X)"""
-        else:
-            return f"""Round {round_num}: Continue the debate. Have your colleagues changed your mind? 
+            else:
+                return f"""Round {round_num}: Continue the debate. Have your colleagues changed your mind?
 
 Provide updated recommendations with confidence scores."""
     
@@ -523,24 +649,44 @@ Confidence: 0-1"""
     ) -> Dict[str, float]:
         """
         Parse which genes each LLM voted to remove.
-        
+
+        Supports both JSON and text formats.
+
         Returns:
             {gene: confidence}
         """
         votes = {}
-        
+
         for msg in messages:
-            # Extract gene names mentioned
+            # Try JSON parsing first if JSON mode is enabled
+            if self.use_json_mode:
+                try:
+                    import json
+                    data = json.loads(msg.message)
+
+                    genes_to_remove = data.get("genes_to_remove", [])
+                    confidence = data.get("confidence", msg.confidence or 0.5)
+
+                    for gene in genes_to_remove:
+                        if gene not in votes or confidence > votes[gene]:
+                            votes[gene] = confidence
+
+                    continue  # Skip text parsing if JSON worked
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    # Fall back to text parsing
+                    pass
+
+            # Text-based parsing (original logic)
             gene_pattern = r'\b[A-Z][A-Z0-9]+\b'
             mentioned_genes = re.findall(gene_pattern, msg.message)
-            
+
             # Check if they're recommended for removal
             lower_msg = msg.message.lower()
             if any(keyword in lower_msg for keyword in ['remove', 'exclude', 'drop', 'eliminate']):
                 for gene in mentioned_genes:
                     if gene not in votes or msg.confidence > votes[gene]:
                         votes[gene] = msg.confidence or 0.5
-        
+
         return votes
     
     def _calculate_convergence(
@@ -549,43 +695,80 @@ Confidence: 0-1"""
     ) -> float:
         """
         Calculate convergence rate based on agreement.
-        
+
+        In JSON mode: Uses gene set overlap (more accurate)
+        In text mode: Uses word overlap (original heuristic)
+
         Returns:
             Float 0-1 (1 = perfect agreement)
         """
         if len(messages) < 2:
             return 0.0
-        
-        # Simple heuristic: compare message similarity
-        # In production, use semantic similarity
-        
+
+        # ✅ IMPROVED: JSON mode uses gene-based convergence
+        if self.use_json_mode:
+            import json
+            gene_sets = []
+
+            for msg in messages:
+                try:
+                    data = json.loads(msg.message)
+                    genes = set(data.get("genes_to_remove", []))
+                    gene_sets.append(genes)
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    # Fall back to text parsing
+                    gene_pattern = r'\b[A-Z][A-Z0-9]+\b'
+                    genes = set(re.findall(gene_pattern, msg.message))
+                    gene_sets.append(genes)
+
+            # Calculate pairwise Jaccard similarity of gene sets
+            similarities = []
+            for i in range(len(gene_sets)):
+                for j in range(i + 1, len(gene_sets)):
+                    set_i = gene_sets[i]
+                    set_j = gene_sets[j]
+
+                    if len(set_i) == 0 and len(set_j) == 0:
+                        # Both agree on removing nothing
+                        similarities.append(1.0)
+                    elif len(set_i) == 0 or len(set_j) == 0:
+                        # One wants to remove genes, other doesn't
+                        similarities.append(0.0)
+                    else:
+                        intersection = len(set_i & set_j)
+                        union = len(set_i | set_j)
+                        similarities.append(intersection / union if union > 0 else 0.0)
+
+            return sum(similarities) / len(similarities) if similarities else 0.0
+
+        # Original text-based convergence
         message_texts = [msg.message.lower() for msg in messages]
-        
+
         # Count keyword overlaps
         all_keywords = set()
         for text in message_texts:
             words = set(text.split())
             all_keywords.update(words)
-        
+
         if not all_keywords:
             return 0.0
-        
+
         # Calculate Jaccard similarity
         similarities = []
         for i in range(len(message_texts)):
             for j in range(i + 1, len(message_texts)):
                 words_i = set(message_texts[i].split())
                 words_j = set(message_texts[j].split())
-                
+
                 intersection = len(words_i & words_j)
                 union = len(words_i | words_j)
-                
+
                 if union > 0:
                     similarities.append(intersection / union)
-        
+
         if not similarities:
             return 0.0
-        
+
         return sum(similarities) / len(similarities)
     
     def _synthesize_final_decision(
