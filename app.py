@@ -53,76 +53,38 @@ import nest_asyncio
 # Original imports
 from db_client import DatabaseClient
 
-def inject_unified_theme():
-    """Single, consistent dark theme"""
+def inject_minimal_styles():
+    """Minimal styling that respects Streamlit's default UI"""
     st.markdown("""
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-    
-    :root {
-        --bg-primary: #0A1929;
-        --bg-secondary: #132F4C;
-        --text-primary: #FFFFFF;
-        --text-secondary: #B2BAC2;
-        --accent-blue: #007FFF;
-        --border-radius: 12px;
-        
-        --debate-qwen: #FF6B9D;
-        --debate-zephyr: #4ECDC4;
-        --debate-phi: #FFD93D;
-        --debate-injector: #9B59B6;
-        --debate-consensus: #2ECC71;
-    }
-    
-    .stApp {
-        background-color: var(--bg-primary);
-        color: var(--text-primary);
-        font-family: 'Inter', sans-serif;
-    }
-    
-    input, textarea, select {
-        background-color: var(--bg-secondary) !important;
-        color: var(--text-primary) !important;
-        border: 1px solid rgba(194, 224, 255, 0.12) !important;
-        border-radius: var(--border-radius) !important;
-        padding: 0.6rem 0.8rem !important;
-    }
-    
-    .stButton button {
-        background-color: var(--accent-blue);
-        color: white;
-        border-radius: var(--border-radius);
-        padding: 0.6rem 1.5rem;
-        font-weight: 600;
-    }
-    
-    .stSlider > div > div > div {
-        background: var(--accent-blue) !important;
-        height: 4px !important;
-    }
-    
-    .stSlider > div > div > div > div {
-        background: white !important;
-        width: 20px !important;
-        height: 20px !important;
-        border: 3px solid var(--accent-blue) !important;
-    }
-    
+    /* Debate message styles only - does not override Streamlit defaults */
     .debate-message {
         padding: 1rem;
         margin: 0.5rem 0;
-        border-radius: var(--border-radius);
+        border-radius: 8px;
         border-left: 4px solid;
     }
-    
-    .debate-qwen { background: rgba(255, 107, 157, 0.1); border-left-color: var(--debate-qwen); }
-    .debate-zephyr { background: rgba(78, 205, 196, 0.1); border-left-color: var(--debate-zephyr); }
-    .debate-phi { background: rgba(255, 217, 61, 0.1); border-left-color: var(--debate-phi); }
-    .debate-injector { background: rgba(155, 89, 182, 0.15); border-left-color: var(--debate-injector); }
-    .debate-consensus { background: rgba(46, 204, 113, 0.15); border-left-color: var(--debate-consensus); }
-    
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
+
+    .debate-qwen {
+        background: rgba(255, 107, 157, 0.1);
+        border-left-color: #FF6B9D;
+    }
+    .debate-zephyr {
+        background: rgba(78, 205, 196, 0.1);
+        border-left-color: #4ECDC4;
+    }
+    .debate-phi {
+        background: rgba(255, 217, 61, 0.1);
+        border-left-color: #FFD93D;
+    }
+    .debate-injector {
+        background: rgba(155, 89, 182, 0.15);
+        border-left-color: #9B59B6;
+    }
+    .debate-consensus {
+        background: rgba(46, 204, 113, 0.15);
+        border-left-color: #2ECC71;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -131,25 +93,25 @@ def render_debate_message_simple(speaker: str, message: str, db_sources: list = 
     """Simple debate message display"""
     speaker_map = {
         'qwen': ('🤖 Qwen 2.5', 'qwen'),
-        'zephyr': ('🤖 Zephyr', 'zephyr'), 
+        'zephyr': ('🤖 Zephyr', 'zephyr'),
         'phi': ('🤖 Phi-3', 'phi'),
         'injector': ('💉 Database', 'injector'),
         'consensus': ('🎯 Consensus', 'consensus')
     }
-    
+
     label, css_class = speaker_map.get(speaker, ('💬 Unknown', 'qwen'))
-    
+
     sources_html = ""
     if db_sources:
-        sources_html = f'<small style="color: var(--text-secondary);">📊 {", ".join(db_sources)}</small><br>'
-    
+        sources_html = f'<small style="color: #666;">📊 {", ".join(db_sources)}</small><br>'
+
     display_message = message if len(message) <= 500 else message[:500] + "..."
-    
+
     st.markdown(f"""
     <div class="debate-message debate-{css_class}">
         <strong>{label}</strong><br>
         {sources_html}
-        <div style="margin-top: 0.5rem; color: var(--text-secondary);">{display_message}</div>
+        <div style="margin-top: 0.5rem; color: #666;">{display_message}</div>
     </div>
     """, unsafe_allow_html=True)
 # NEW: Debate system imports
@@ -1947,7 +1909,7 @@ def render_layer4_debate_verification(query):
 **Total Rounds:** {result.total_rounds}
 """
         
-        render_chat_message(
+        render_debate_message_simple(
             speaker="consensus",
             message=consensus_text,
             db_sources=[]
@@ -2191,8 +2153,8 @@ def main():
     )
     
     initialize_session_state()
-    inject_unified_theme()
-    
+    inject_minimal_styles()
+
     st.markdown("""
     <div style='text-align: center; padding: 32px 0 16px 0;'>
         <h1>🧬 Signature Generator</h1>
