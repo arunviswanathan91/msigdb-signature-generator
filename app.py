@@ -1102,10 +1102,60 @@ def render_sidebar():
                 st.markdown(f"**Total: {total/60:.1f}m**")
         
         st.markdown("---")
+
+        # Cache Statistics Section
+        with st.expander("📊 Search Cache Stats", expanded=False):
+            try:
+                cache_client = SearchCacheClient()
+                stats = cache_client.get_stats()
+
+                if stats and stats.get('total_entries', 0) > 0:
+                    col1, col2 = st.columns(2)
+
+                    with col1:
+                        st.metric(
+                            "Cached Searches",
+                            stats.get('total_entries', 0),
+                            help="Total number of unique searches cached"
+                        )
+
+                    with col2:
+                        st.metric(
+                            "Total Hits",
+                            stats.get('total_hits', 0),
+                            help="Number of times cache was reused"
+                        )
+
+                    # Average hits per entry
+                    total_entries = stats.get('total_entries', 0)
+                    total_hits = stats.get('total_hits', 0)
+                    if total_entries > 0:
+                        avg_hits = total_hits / total_entries
+                        st.caption(f"📈 Average reuse: {avg_hits:.1f}x per query")
+
+                    # KB versions breakdown
+                    if stats.get('kb_versions'):
+                        st.markdown("**Knowledge Base Versions:**")
+                        for version, count in stats['kb_versions'].items():
+                            st.caption(f"• v{version}: {count} cached queries")
+
+                    # Cache efficiency indicator
+                    if total_hits > 0:
+                        st.success("✅ Cache is active and saving compute time!")
+                    else:
+                        st.info("💡 Cache is building - run queries to populate it")
+                else:
+                    st.info("🆕 Cache is empty. Run some signature generations to populate it!")
+
+            except Exception as e:
+                st.caption(f"⚠️ Cache unavailable: {str(e)[:60]}")
+                st.caption("💡 Cache server might be sleeping - it will wake up on first use")
+
+        st.markdown("---")
         st.markdown("### ℹ️ Pipeline")
         st.caption("""
         **Layers:**
-        
+
         1. 🧠 Granularity + Selection
         2. 🔍 Semantic (ALL queries)
         3. 🔬 DAM (Remote API)
