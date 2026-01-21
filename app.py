@@ -91,7 +91,11 @@ def inject_minimal_styles():
 
 
 def render_debate_message_simple(speaker: str, message: str, db_sources: list = None):
-    """Simple debate message display"""
+    """
+    Simple debate message display with error detection.
+
+    ✅ FIX BUG #3: Detects error messages and displays them distinctly
+    """
     speaker_map = {
         'qwen': ('🤖 Qwen 2.5', 'qwen'),
         'zephyr': ('🤖 Zephyr', 'zephyr'),
@@ -102,6 +106,28 @@ def render_debate_message_simple(speaker: str, message: str, db_sources: list = 
 
     label, css_class = speaker_map.get(speaker, ('💬 Unknown', 'qwen'))
 
+    # ✅ Detect if this is an error message
+    is_error = (
+        message.startswith("Error (") or
+        "failed:" in message.lower() or
+        "exception" in message.lower() or
+        "not found" in message.lower()
+    )
+
+    if is_error:
+        # Display as error with red styling
+        st.markdown(f"""
+        <div style='background: rgba(235, 0, 20, 0.1); border-left: 4px solid #EB0014;
+                    padding: 1rem; border-radius: 8px; margin: 0.5rem 0;'>
+            <strong>❌ {label} (FAILED)</strong><br>
+            <code style='color: #EB0014; background: rgba(0,0,0,0.05);
+                        padding: 0.5rem; display: block; margin-top: 0.5rem;
+                        border-radius: 4px; white-space: pre-wrap;'>{message}</code>
+        </div>
+        """, unsafe_allow_html=True)
+        return
+
+    # Normal message display
     sources_html = ""
     if db_sources:
         sources_html = f'<small style="color: #666;">📊 {", ".join(db_sources)}</small><br>'
@@ -842,20 +868,22 @@ def run_validation_debate_sync(
     max_rounds: int = 10
 ) -> Optional[DebateResult]:
     """
-    Synchronous wrapper for validation debate.
+    Synchronous wrapper for validation debate with enhanced error handling.
     """
     if not DEBATE_SYSTEM_AVAILABLE:
         st.error("Debate system not available. Install required modules.")
         return None
-    
+
     try:
         # Initialize debate engine with Groq API
+        # validate_models=False to avoid blocking on init
         debate_engine = MultiRoundDebateEngine(
             api_key=st.session_state.groq_api_key,
             db_client=st.session_state.db_client_enhanced,
-            base_url="https://api.groq.com/openai/v1"
+            base_url="https://api.groq.com/openai/v1",
+            validate_models=False  # Skip validation for faster init
         )
-        
+
         # Run async debate
         async def run():
             return await debate_engine.run_validation_debate(
@@ -864,16 +892,41 @@ def run_validation_debate_sync(
                 max_rounds=max_rounds,
                 convergence_threshold=0.85
             )
-        
+
         loop = asyncio.get_event_loop()
         result = loop.run_until_complete(run())
-        
+
         return result
-        
+
     except Exception as e:
-        st.error(f"Debate failed: {e}")
-        import traceback
-        st.code(traceback.format_exc())
+        st.error(f"❌ Debate failed: {e}")
+
+        # Provide helpful error messages
+        error_str = str(e).lower()
+        if "model" in error_str and ("not found" in error_str or "does not exist" in error_str):
+            st.warning("""
+            **Model Not Found Error**
+
+            One or more Groq models are unavailable. This usually means:
+            1. The model ID is incorrect
+            2. The model was deprecated by Groq
+            3. Your API key doesn't have access to that model
+
+            **Solution**: Run the diagnostic tool to find working models:
+            ```bash
+            python groq_model_diagnostic.py <your_groq_api_key>
+            ```
+            """)
+        elif "api" in error_str and "key" in error_str:
+            st.warning("Check your Groq API key. It may be invalid or expired.")
+        elif "rate" in error_str or "limit" in error_str:
+            st.warning("Rate limit exceeded. Wait a few seconds and try again.")
+
+        # Show full traceback in expander
+        with st.expander("🔍 View Full Error Details"):
+            import traceback
+            st.code(traceback.format_exc())
+
         return None
 
 
