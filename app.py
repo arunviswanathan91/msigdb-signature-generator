@@ -53,6 +53,7 @@ from openai import OpenAI  # NEW: For Groq API
 
 # Original imports
 from db_client import DatabaseClient
+from cache_client import SearchCacheClient
 
 def inject_minimal_styles():
     """Minimal styling that respects Streamlit's default UI"""
@@ -1101,10 +1102,60 @@ def render_sidebar():
                 st.markdown(f"**Total: {total/60:.1f}m**")
         
         st.markdown("---")
+
+        # Cache Statistics Section
+        with st.expander("📊 Search Cache Stats", expanded=False):
+            try:
+                cache_client = SearchCacheClient()
+                stats = cache_client.get_stats()
+
+                if stats and stats.get('total_entries', 0) > 0:
+                    col1, col2 = st.columns(2)
+
+                    with col1:
+                        st.metric(
+                            "Cached Searches",
+                            stats.get('total_entries', 0),
+                            help="Total number of unique searches cached"
+                        )
+
+                    with col2:
+                        st.metric(
+                            "Total Hits",
+                            stats.get('total_hits', 0),
+                            help="Number of times cache was reused"
+                        )
+
+                    # Average hits per entry
+                    total_entries = stats.get('total_entries', 0)
+                    total_hits = stats.get('total_hits', 0)
+                    if total_entries > 0:
+                        avg_hits = total_hits / total_entries
+                        st.caption(f"📈 Average reuse: {avg_hits:.1f}x per query")
+
+                    # KB versions breakdown
+                    if stats.get('kb_versions'):
+                        st.markdown("**Knowledge Base Versions:**")
+                        for version, count in stats['kb_versions'].items():
+                            st.caption(f"• v{version}: {count} cached queries")
+
+                    # Cache efficiency indicator
+                    if total_hits > 0:
+                        st.success("✅ Cache is active and saving compute time!")
+                    else:
+                        st.info("💡 Cache is building - run queries to populate it")
+                else:
+                    st.info("🆕 Cache is empty. Run some signature generations to populate it!")
+
+            except Exception as e:
+                st.caption(f"⚠️ Cache unavailable: {str(e)[:60]}")
+                st.caption("💡 Cache server might be sleeping - it will wake up on first use")
+
+        st.markdown("---")
         st.markdown("### ℹ️ Pipeline")
         st.caption("""
         **Layers:**
-        
+
         1. 🧠 Granularity + Selection
         2. 🔍 Semantic (ALL queries)
         3. 🔬 DAM (Remote API)
@@ -1554,7 +1605,19 @@ def render_layer2_semantic_fixed(query, target_count, min_genes, max_genes):
             )
             
             status.success(f"✅ Loaded {len(pathway_embeddings):,} pathway embeddings")
-            
+
+            # Initialize cache client
+            status.info("🔌 Connecting to cache server...")
+            cache_client = SearchCacheClient(
+                api_url="https://arunviswanathan91-msigdb-api.hf.space"
+            )
+
+            # Track cache statistics
+            total_searches = 0
+            cache_hits = 0
+
+            status.success("✅ Cache client ready")
+
             progress_bar.progress(40)
             status.info("🧬 Building signatures with TRUE diversity...")
             
@@ -1589,15 +1652,23 @@ def render_layer2_semantic_fixed(query, target_count, min_genes, max_genes):
                 
                 for query_idx, mech_query in enumerate(mechanism_queries):
                     status.info(f"   🔍 Searching: {facet_name} (Query {query_idx+1}/{len(mechanism_queries)})")
-                    
-                    rp, ps = fast_semantic_search(
-                        mech_query,
-                        pathway_embeddings,
-                        pathways_dict,
-                        embedding_model,
+
+                    # Use cache-aware search
+                    rp, ps, was_cached = cache_client.search_with_cache(
+                        query=mech_query,
+                        facet_name=facet_name,
+                        mechanism_name=mech_query,
+                        embedding_model=embedding_model,
+                        pathway_embeddings=pathway_embeddings,
+                        pathways_dict=pathways_dict,
                         top_k=50
                     )
-                    
+
+                    # Track cache performance
+                    total_searches += 1
+                    if was_cached:
+                        cache_hits += 1
+
                     if rp:
                         facet_pathways_dict.update(rp)
                         for pid, score in ps.items():
@@ -1621,7 +1692,15 @@ def render_layer2_semantic_fixed(query, target_count, min_genes, max_genes):
                 
                 progress = 40 + int((i + 1) / len(selected_facets) * 50)
                 progress_bar.progress(progress)
-            
+
+            # Display cache performance
+            if total_searches > 0:
+                cache_hit_rate = (cache_hits / total_searches * 100)
+                if cache_hits > 0:
+                    st.success(f"📊 Cache Performance: {cache_hits}/{total_searches} hits ({cache_hit_rate:.1f}%)")
+                else:
+                    st.info(f"📊 Cache Performance: 0/{total_searches} hits (all new queries cached for future use)")
+
             # Trim to exact target (should be close already)
             if len(all_signatures) > target_count:
                 all_signatures.sort(key=lambda s: s.confidence, reverse=True)

@@ -25,5 +25,5 @@ packaging>=23.0
 
 # Additional dependencies for KB building
 tqdm>=4.65.0
-requests
+requests>=2.31.0
 nest_asyncio>=1.5.0
