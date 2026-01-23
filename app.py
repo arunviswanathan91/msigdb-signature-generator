@@ -67,15 +67,15 @@ def inject_minimal_styles():
         border-left: 4px solid;
     }
 
-    .debate-qwen {
+    .debate-skeptic {
         background: rgba(255, 107, 157, 0.1);
         border-left-color: #FF6B9D;
     }
-    .debate-zephyr {
+    .debate-discoverer {
         background: rgba(78, 205, 196, 0.1);
         border-left-color: #4ECDC4;
     }
-    .debate-phi {
+    .debate-mediator {
         background: rgba(255, 217, 61, 0.1);
         border-left-color: #FFD93D;
     }
@@ -98,11 +98,11 @@ def render_debate_message_simple(speaker: str, message: str, db_sources: list = 
     ✅ FIX BUG #3: Detects error messages and displays them distinctly
     """
     speaker_map = {
-        'qwen': ('🤖 Qwen 2.5', 'qwen'),
-        'zephyr': ('🤖 Zephyr', 'zephyr'),
-        'phi': ('🤖 Phi-3', 'phi'),
-        'injector': ('💉 Database', 'injector'),
-        'consensus': ('🎯 Consensus', 'consensus')
+        'skeptic': ('🔬 Skeptic (Meta Llama 70B)', 'skeptic'),
+        'discoverer': ('💡 Discoverer (Meta Llama 8B)', 'discoverer'),
+        'mediator': ('⚖️ Mediator (Google Gemma 9B)', 'mediator'),
+        'injector': ('💉 Database Evidence', 'injector'),
+        'consensus': ('🎯 Final Consensus', 'consensus')
     }
 
     label, css_class = speaker_map.get(speaker, ('💬 Unknown', 'qwen'))
@@ -251,7 +251,7 @@ def filter_housekeeping_genes(
 
 @dataclass
 class GeneSignature:
-    """A biologically meaningful gene signature"""
+    """A biologically meaningful gene signature with quality metrics"""
     signature_id: str
     signature_name: str
     genes: List[str]
@@ -262,7 +262,12 @@ class GeneSignature:
     source_pathways: List[str] = field(default_factory=list)
     dam_expanded: bool = False
     llm2_verified: bool = False
-    debate_verified: bool = False  # NEW
+    debate_verified: bool = False
+
+    # NEW: Publication-grade quality metrics
+    stability_score: float = 1.0  # 1.0 = stable, 0.0 = controversial
+    debate_entropy: float = 0.0   # Shannon entropy from debate
+    debate_conflict: float = 0.0  # Vote variance from debate
     
     def to_dict(self):
         return {
@@ -276,8 +281,24 @@ class GeneSignature:
             'top_genes': self.genes[:5] if len(self.genes) > 5 else self.genes,
             'dam_expanded': self.dam_expanded,
             'llm2_verified': self.llm2_verified,
-            'debate_verified': self.debate_verified  # NEW
+            'debate_verified': self.debate_verified,
+            # NEW: Quality metrics for publication
+            'stability_score': self.stability_score,
+            'debate_quality': {
+                'entropy': self.debate_entropy,
+                'conflict': self.debate_conflict,
+                'interpretation': self._interpret_quality()
+            }
         }
+
+    def _interpret_quality(self) -> str:
+        """Interpret quality metrics for users"""
+        if self.stability_score >= 0.8:
+            return "HIGH_CONFIDENCE"
+        elif self.stability_score >= 0.5:
+            return "MODERATE_CONFIDENCE"
+        else:
+            return "REQUIRES_MANUAL_REVIEW"
     
     def gene_set_hash(self) -> str:
         """Hash of gene set for deduplication"""
@@ -896,6 +917,19 @@ def run_validation_debate_sync(
 
         loop = asyncio.get_event_loop()
         result = loop.run_until_complete(run())
+
+        # Calculate stability score from debate evolution
+        if result and hasattr(result, 'decision_metrics'):
+            # Stability = 1 - (entropy * 0.5 + conflict * 0.5)
+            # High entropy or conflict = low stability
+            entropy = result.decision_metrics.get('entropy', 0.0)
+            conflict = result.decision_metrics.get('conflict', 0.0)
+
+            stability = 1.0 - (entropy * 0.5 + conflict * 0.5)
+            stability = max(0.0, min(1.0, stability))  # Clamp to [0,1]
+
+            # Store in result for later use
+            result.stability_score = stability
 
         return result
 
@@ -2099,6 +2133,99 @@ def render_layer4_debate_verification(query):
                         db_sources=msg.db_sources if msg.db_sources else None
                     )
         
+        # Convergence visualization (native Streamlit - no dependencies)
+        st.markdown("---")
+        st.markdown("### 📈 Debate Convergence")
+
+        convergence_data = pd.DataFrame({
+            'Round': [r.round_num for r in result.all_rounds],
+            'Agreement (%)': [r.convergence_rate * 100 for r in result.all_rounds]
+        })
+
+        st.line_chart(convergence_data.set_index('Round'))
+
+        # Show quality metrics
+        if hasattr(result, 'decision_metrics') and result.decision_metrics:
+            col1, col2, col3 = st.columns(3)
+
+            with col1:
+                st.metric(
+                    "Uncertainty",
+                    f"{result.decision_metrics.get('entropy', 0) * 100:.1f}%",
+                    help="Shannon entropy: Lower is better (0% = no uncertainty)"
+                )
+
+            with col2:
+                st.metric(
+                    "Conflict",
+                    f"{result.decision_metrics.get('conflict', 0) * 100:.1f}%",
+                    help="Vote variance: Lower is better (0% = perfect agreement)"
+                )
+
+            with col3:
+                st.metric(
+                    "Stability",
+                    f"{getattr(result, 'stability_score', 0.5) * 100:.1f}%",
+                    help="Overall quality: Higher is better (100% = high confidence)"
+                )
+
+        # Optional: Advanced analytics (only loads if plotly installed)
+        with st.expander("📊 Advanced Analytics (Click to Load)", expanded=False):
+            try:
+                import plotly.graph_objects as go
+
+                # Consensus gauge
+                fig_gauge = go.Figure(go.Indicator(
+                    mode="gauge+number",
+                    value=result.confidence * 100,
+                    title={'text': "Final Confidence"},
+                    domain={'x': [0, 1], 'y': [0, 1]},
+                    gauge={
+                        'axis': {'range': [0, 100]},
+                        'bar': {'color': "darkblue"},
+                        'steps': [
+                            {'range': [0, 50], 'color': "lightgray"},
+                            {'range': [50, 70], 'color': "yellow"},
+                            {'range': [70, 100], 'color': "green"}
+                        ],
+                        'threshold': {
+                            'line': {'color': "red", 'width': 4},
+                            'thickness': 0.75,
+                            'value': 70
+                        }
+                    }
+                ))
+
+                fig_gauge.update_layout(height=300)
+                st.plotly_chart(fig_gauge, use_container_width=True)
+
+                # Evolution trajectory
+                rounds = [r.round_num for r in result.all_rounds]
+                convergences = [r.convergence_rate * 100 for r in result.all_rounds]
+
+                fig_line = go.Figure()
+                fig_line.add_trace(go.Scatter(
+                    x=rounds,
+                    y=convergences,
+                    mode='lines+markers',
+                    name='Convergence',
+                    line=dict(color='blue', width=3),
+                    marker=dict(size=10)
+                ))
+
+                fig_line.update_layout(
+                    title="Debate Convergence Trajectory",
+                    xaxis_title="Round Number",
+                    yaxis_title="Agreement (%)",
+                    height=400,
+                    hovermode="x unified"
+                )
+
+                st.plotly_chart(fig_line, use_container_width=True)
+
+            except ImportError:
+                st.info("💡 Install 'plotly' for advanced visualizations:\n```pip install plotly>=5.18.0```")
+
         # Final consensus
         st.markdown("---")
         st.markdown("### 🎯 Final Consensus")
@@ -2127,15 +2254,28 @@ def render_layer4_debate_verification(query):
             
             if st.button("✂️ Apply Recommendations (Remove Flagged Genes)", type="primary", use_container_width=True, key="apply_debate"):
                 genes_to_remove = set(result.affected_genes)
-                
-                # Update all signatures
+
+                # Update all signatures with debate results AND quality metrics
                 signatures = [st.session_state.signature_cache[sid] for sid in st.session_state.signature_ids]
-                
+
                 for sig in signatures:
                     sig.genes = [g for g in sig.genes if g not in genes_to_remove]
                     sig.debate_verified = True
+
+                    # NEW: Tag with quality metrics from debate
+                    if hasattr(result, 'decision_metrics'):
+                        sig.debate_entropy = result.decision_metrics.get('entropy', 0.0)
+                        sig.debate_conflict = result.decision_metrics.get('conflict', 0.0)
+
+                    if hasattr(result, 'stability_score'):
+                        sig.stability_score = result.stability_score
+
                     st.session_state.signature_cache[sig.signature_id] = sig
-                
+
+                # Show quality summary
+                if hasattr(result, 'stability_score'):
+                    st.info(f"📊 Debate Quality: {result.stability_score:.2%} stability score")
+
                 st.success(f"✅ Removed {len(genes_to_remove)} genes from all signatures")
                 time.sleep(1)
                 st.rerun()
@@ -2290,11 +2430,17 @@ def render_layer5_approval_text_based():
         col1, col2 = st.columns(2)
         
         with col1:
-            # GMT
+            # GMT - Sort by stability score (high to low)
+            approved_sigs_sorted = sorted(
+                approved_sigs,
+                key=lambda s: s.stability_score,
+                reverse=True
+            )
+
             gmt_lines = []
-            for sig in approved_sigs:
+            for sig in approved_sigs_sorted:
                 sig_id = sig.signature_id
-                desc = f"{sig.facet}|{sig.mechanism}|{len(sig.genes)}genes|conf:{sig.confidence:.3f}"
+                desc = f"{sig.facet}|{sig.mechanism}|{len(sig.genes)}genes|conf:{sig.confidence:.3f}|stability:{sig.stability_score:.3f}"
                 if sig.dam_expanded:
                     desc += "|DAM"
                 if sig.llm2_verified:
@@ -2321,11 +2467,21 @@ def render_layer5_approval_text_based():
                 'generation_mode': st.session_state.get('generation_mode', 'exploratory'),
                 'biological_context': st.session_state.get('bio_context'),
                 'verification_method': st.session_state.get('verification_method', 'batch'),
-                'signatures': [sig.to_dict() for sig in approved_sigs],
-                'total_signatures': len(approved_sigs),
+                'signatures': [sig.to_dict() for sig in approved_sigs_sorted],  # ← Use sorted list
+                'total_signatures': len(approved_sigs_sorted),
                 'timestamp': datetime.now().isoformat(),
                 'layer_timings': {t.layer_name: t.duration_str for t in st.session_state.layer_timings},
-                'pipeline_version': '2.2-debate-system',
+                'pipeline_version': '2.3-entropy-stability',  # ← Update version
+
+                # NEW: Quality summary statistics
+                'quality_summary': {
+                    'high_stability_count': sum(1 for s in approved_sigs_sorted if s.stability_score >= 0.8),
+                    'moderate_stability_count': sum(1 for s in approved_sigs_sorted if 0.5 <= s.stability_score < 0.8),
+                    'low_stability_count': sum(1 for s in approved_sigs_sorted if s.stability_score < 0.5),
+                    'avg_stability': sum(s.stability_score for s in approved_sigs_sorted) / len(approved_sigs_sorted) if approved_sigs_sorted else 0.0,
+                    'avg_entropy': sum(s.debate_entropy for s in approved_sigs_sorted) / len(approved_sigs_sorted) if approved_sigs_sorted else 0.0,
+                    'avg_conflict': sum(s.debate_conflict for s in approved_sigs_sorted) / len(approved_sigs_sorted) if approved_sigs_sorted else 0.0
+                }
             }
             
             # Add debate results if available
@@ -2335,7 +2491,10 @@ def render_layer5_approval_text_based():
                     'final_decision': st.session_state.current_debate_result.final_decision,
                     'affected_genes': st.session_state.current_debate_result.affected_genes,
                     'confidence': st.session_state.current_debate_result.confidence,
-                    'convergence_rate': st.session_state.current_debate_result.convergence_rate
+                    'convergence_rate': st.session_state.current_debate_result.convergence_rate,
+                    # NEW: Quality metrics
+                    'decision_metrics': getattr(st.session_state.current_debate_result, 'decision_metrics', {}),
+                    'stability_score': getattr(st.session_state.current_debate_result, 'stability_score', 0.0)
                 }
             
             st.download_button(
