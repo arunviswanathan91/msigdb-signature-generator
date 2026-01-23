@@ -629,6 +629,12 @@ IMPORTANT:
 3. You may also suggest removing genes NOT flagged by the database if biologically irrelevant.
 4. DO NOT HALLUCINATE: Base all claims on real biological mechanisms.
 
+IMPORTANT FORMATTING:
+- Do NOT use HTML tags (<strong>, <em>, <div>, etc.)
+- Do NOT use markdown code blocks (```json, ```)
+- Use plain text only
+- Structure with line breaks and clear sections
+
 Respond with JSON ONLY in this exact format:
 {{
   "genes_to_remove": ["GENE1", "GENE2"],
@@ -661,6 +667,12 @@ IMPORTANT:
 2. If you have strong biological reasoning to disagree with the database (e.g., context-specific expression), please do so.
 3. You may also suggest removing genes NOT flagged by the database if they are biologically irrelevant.
 4. DO NOT HALLUCINATE: Base all claims on verifying real biological mechanisms.
+
+IMPORTANT FORMATTING:
+- Do NOT use HTML tags (<strong>, <em>, <div>, etc.)
+- Do NOT use markdown code blocks (```json, ```)
+- Use plain text only
+- Structure with line breaks and clear sections
 
 Provide:
 1. List of genes to remove (if any)

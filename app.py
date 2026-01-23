@@ -50,10 +50,27 @@ import pickle
 import asyncio
 import nest_asyncio
 from openai import OpenAI  # NEW: For Groq API
+import html
+import re
 
 # Original imports
 from db_client import DatabaseClient
 from cache_client import SearchCacheClient
+
+
+def sanitize_llm_response(text: str) -> str:
+    """Remove markdown/HTML from LLM responses for safe display"""
+    # Strip markdown code blocks
+    text = re.sub(r'```(?:json|python|html|)?\n?(.*?)\n?```', r'\1', text, flags=re.DOTALL)
+
+    # Escape HTML entities
+    text = html.escape(text)
+
+    # Preserve line breaks
+    text = text.replace('\n', '<br>')
+
+    return text
+
 
 def inject_minimal_styles():
     """Minimal styling that respects Streamlit's default UI"""
@@ -133,7 +150,8 @@ def render_debate_message_simple(speaker: str, message: str, db_sources: list = 
     if db_sources:
         sources_html = f'<small style="color: #666;">📊 {", ".join(db_sources)}</small><br>'
 
-    display_message = message if len(message) <= 500 else message[:500] + "..."
+    # Sanitize message to remove HTML/markdown tags
+    display_message = sanitize_llm_response(message) if len(message) <= 500 else sanitize_llm_response(message[:500]) + "..."
 
     st.markdown(f"""
     <div class="debate-message debate-{css_class}">
@@ -1120,7 +1138,19 @@ def render_sidebar():
             st.success("✅ Debate System: Available")
         else:
             st.warning("⚠️ Debate System: Not Available")
-        
+
+        st.markdown("---")
+
+        # API Logging Toggle
+        with st.expander("⚙️ Advanced Settings"):
+            api_logging = st.checkbox(
+                "Enable detailed API logging",
+                value=True,
+                help="Show detailed progress in Layers 2-3 (semantic search & DAM expansion)",
+                key="enable_api_logging"
+            )
+            st.session_state['api_logging_enabled'] = api_logging
+
         st.markdown("---")
         
         # Timing diagnostics
@@ -1607,10 +1637,17 @@ def render_layer2_semantic_fixed(query, target_count, min_genes, max_genes):
     if st.button("🚀 Build Semantic Signatures", type="primary", use_container_width=True):
         
         timing = LayerTiming("Layer 2: Semantic Building", time.time())
-        
+
         progress_bar = st.progress(0)
         status = st.empty()
-        
+
+        # Add collapsible detailed progress
+        if st.session_state.get('api_logging_enabled', True):
+            with st.expander("🔍 Detailed Progress", expanded=True):
+                detail_container = st.container()
+        else:
+            detail_container = None
+
         try:
             # Load KB
             status.info("📚 Loading KB...")
@@ -1678,14 +1715,28 @@ def render_layer2_semantic_fixed(query, target_count, min_genes, max_genes):
             for i, facet in enumerate(selected_facets):
                 facet_name = facet['facet_name']
                 mechanism_queries = facet.get('mechanism_queries', [facet_name])
-                
+
+                status.info(f"🔍 Processing mechanism {i+1}/{len(selected_facets)}: {facet_name}")
+
+                # Show details in expander
+                if detail_container:
+                    with detail_container:
+                        st.markdown(f"**📋 Mechanism {i+1}: {facet_name}**")
+
                 # FIX ROOT CAUSE #1: Use ALL queries, not just [:1]
                 # Aggregate pathways from ALL queries first (Fix for Diversity Loss)
                 facet_pathways_dict = {}
                 facet_similarities = {}
-                
+
                 for query_idx, mech_query in enumerate(mechanism_queries):
                     status.info(f"   🔍 Searching: {facet_name} (Query {query_idx+1}/{len(mechanism_queries)})")
+
+                    # Show query details in expander
+                    if detail_container:
+                        with detail_container:
+                            query_display = mech_query[:70] + "..." if len(mech_query) > 70 else mech_query
+                            st.caption(f"   🔎 Query {query_idx+1}/{len(mechanism_queries)}: '{query_display}'")
+                            st.caption(f"   🧮 Encoding to 384-dim vector and comparing against {len(pathway_embeddings):,} pathways...")
 
                     # Use cache-aware search
                     rp, ps, was_cached = cache_client.search_with_cache(
@@ -1703,6 +1754,19 @@ def render_layer2_semantic_fixed(query, target_count, min_genes, max_genes):
                     if was_cached:
                         cache_hits += 1
 
+                    # Show results in expander
+                    if detail_container:
+                        with detail_container:
+                            if was_cached:
+                                st.caption(f"   ✅ **Cache HIT** - Retrieved {len(rp)} pathways instantly")
+                            else:
+                                if rp:
+                                    top_pathway = list(rp.keys())[0]
+                                    top_score = ps[top_pathway]
+                                    top_pathway_display = top_pathway[:50] + "..." if len(top_pathway) > 50 else top_pathway
+                                    st.caption(f"   ✅ Found {len(rp)} pathways | Top: {top_pathway_display} (score: {top_score:.3f})")
+                                    st.caption(f"   💾 Cached for future queries")
+
                     if rp:
                         facet_pathways_dict.update(rp)
                         for pid, score in ps.items():
@@ -1713,7 +1777,12 @@ def render_layer2_semantic_fixed(query, target_count, min_genes, max_genes):
                     num_variants = variants_per_mechanism
                     if i < remainder:
                         num_variants += 1
-                        
+
+                    # Show signature building details
+                    if detail_container:
+                        with detail_container:
+                            st.caption(f"   🧬 Building {num_variants} signature variants...")
+
                     # Build diverse mechanisms from the aggregated pool
                     mechanism_sigs = builder.build_multiple_mechanisms_dynamic(
                         facet_name,
@@ -1721,9 +1790,21 @@ def render_layer2_semantic_fixed(query, target_count, min_genes, max_genes):
                         facet_similarities,
                         num_variants=num_variants
                     )
-                    
+
+                    # Show created signatures
+                    if detail_container and mechanism_sigs:
+                        with detail_container:
+                            st.caption(f"   ✅ Created {len(mechanism_sigs)} signatures:")
+                            for sig in mechanism_sigs:
+                                st.caption(f"      • {sig.signature_name} ({len(sig.genes)} genes)")
+
                     all_signatures.extend(mechanism_sigs)
-                
+
+                # Add separator between mechanisms
+                if detail_container:
+                    with detail_container:
+                        st.markdown("---")
+
                 progress = 40 + int((i + 1) / len(selected_facets) * 50)
                 progress_bar.progress(progress)
 
@@ -1833,36 +1914,81 @@ def render_layer3_dam_remote():
                 status.success("✅ Connected!")
                 
                 signatures = [
-                    st.session_state.signature_cache[sid] 
+                    st.session_state.signature_cache[sid]
                     for sid in st.session_state.signature_ids
                 ]
-                
+
                 progress_bar = st.progress(0)
                 progress_text = st.empty()
-                
+
+                # Add collapsible detailed logging
+                if st.session_state.get('api_logging_enabled', True):
+                    with st.expander("📡 API Call Details", expanded=True):
+                        api_log_container = st.container()
+                else:
+                    api_log_container = None
+
                 total = len(signatures)
                 expanded_count = 0
-                
+
                 for i, sig in enumerate(signatures):
-                    progress_text.info(
-                        f"🔍 Querying API... signature {i+1}/{total}: {sig.signature_name}"
-                    )
-                    
+                    progress_text.info(f"🔬 Expanding signature {i+1}/{total}: {sig.signature_name}")
+
+                    # Log API call details
+                    if api_log_container:
+                        with api_log_container:
+                            st.markdown(f"**Signature {i+1}/{total}: {sig.signature_name}**")
+                            st.caption(f"   📡 Endpoint: POST /api/expand-signature")
+                            st.caption(f"   📊 Parameters:")
+                            st.caption(f"      • Seed genes: {len(sig.genes)}")
+                            st.caption(f"      • Expansion strength: {expansion_strength:.2f}")
+                            st.caption(f"      • Max neighbors per gene: {max_neighbors}")
+                            st.caption(f"   ⏳ Querying gene_gene.db (2.1M connections)...")
+
+                    start_time = time.time()
+
                     try:
+                        original_genes = set(sig.genes)
                         expanded_genes = db_api.expand_signature_smart(
                             seed_genes=sig.genes,
                             strength=expansion_strength,
                             max_pathways_per_gene=max_neighbors
                         )
-                        
+
+                        elapsed = time.time() - start_time
+                        new_genes = set(expanded_genes) - original_genes
+
+                        # Show results in expander
+                        if api_log_container:
+                            with api_log_container:
+                                st.caption(f"   ✅ Response in {elapsed:.2f}s")
+                                st.caption(f"   📈 Results:")
+                                st.caption(f"      • Original: {len(original_genes)} genes")
+                                st.caption(f"      • Added: {len(new_genes)} genes")
+                                if new_genes:
+                                    new_genes_list = list(new_genes)[:5]
+                                    new_genes_str = ', '.join(new_genes_list)
+                                    if len(new_genes) > 5:
+                                        new_genes_str += '...'
+                                    st.caption(f"      • New genes: {new_genes_str}")
+                                st.caption(f"      • Final: {len(expanded_genes)} genes")
+
                         sig.genes = list(expanded_genes)
                         sig.dam_expanded = True
                         st.session_state.signature_cache[sig.signature_id] = sig
                         expanded_count += 1
-                        
+
                     except Exception as e:
-                        st.warning(f"⚠️ Failed: {sig.signature_name}")
-                    
+                        if api_log_container:
+                            with api_log_container:
+                                st.caption(f"   ❌ API Error: {str(e)[:100]}")
+                        st.warning(f"⚠️ Failed to expand: {sig.signature_name}")
+
+                    # Add separator between signatures
+                    if api_log_container:
+                        with api_log_container:
+                            st.markdown("---")
+
                     progress_bar.progress((i + 1) / total)
                 
                 timing.end_time = time.time()
@@ -2280,6 +2406,96 @@ def render_layer4_debate_verification(query):
                 time.sleep(1)
                 st.rerun()
 
+        # Gene addition suggestions feature
+        if st.session_state.current_debate_result:
+            st.markdown("---")
+            st.markdown("### 🧬 Suggest Gene Additions (Optional)")
+
+            st.markdown("""
+            <div style='background: rgba(0, 127, 255, 0.1); padding: 1rem; border-radius: 8px; border-left: 4px solid #007FFF;'>
+            Use gene-gene network (DAM) to suggest biologically relevant additions based on connectivity.
+            </div>
+            """, unsafe_allow_html=True)
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+                addition_strength = st.slider(
+                    "Network confidence threshold:",
+                    min_value=0.5,
+                    max_value=0.9,
+                    value=0.7,
+                    step=0.05,
+                    help="Higher = only very confident connections"
+                )
+
+            with col2:
+                max_additions = st.slider(
+                    "Max additions per signature:",
+                    min_value=1,
+                    max_value=10,
+                    value=3,
+                    step=1
+                )
+
+            if st.button("🔍 Generate Addition Suggestions", type="primary", use_container_width=True, key="gen_additions"):
+
+                suggestions_made = False
+                signatures = [st.session_state.signature_cache[sid] for sid in st.session_state.signature_ids]
+
+                # Initialize suggestions storage
+                if 'gene_addition_suggestions' not in st.session_state:
+                    st.session_state.gene_addition_suggestions = {}
+
+                try:
+                    db_api = DatabaseClient("https://arunviswanathan91-msigdb-api.hf.space")
+
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+
+                    for i, sig in enumerate(signatures):
+                        status_text.info(f"🔍 Analyzing signature {i+1}/{len(signatures)}: {sig.signature_name}")
+
+                        try:
+                            # Get high-confidence neighbors
+                            expanded = db_api.expand_signature_smart(
+                                seed_genes=sig.genes,
+                                strength=addition_strength,
+                                max_pathways_per_gene=max_additions * 2  # Get extras for filtering
+                            )
+
+                            # Get candidates (new genes only)
+                            candidates = list(set(expanded) - set(sig.genes))
+
+                            # Filter housekeeping genes
+                            from complete_module_replacements import HOUSEKEEPING_GENES
+                            filtered_candidates = [
+                                g for g in candidates
+                                if g not in HOUSEKEEPING_GENES
+                                and not g.startswith(('RPL', 'RPS', 'MT-'))
+                            ][:max_additions]
+
+                            if filtered_candidates:
+                                st.session_state.gene_addition_suggestions[sig.signature_id] = filtered_candidates
+                                suggestions_made = True
+
+                        except Exception as e:
+                            st.warning(f"⚠️ Failed for {sig.signature_name}: {str(e)[:80]}")
+
+                        progress_bar.progress((i + 1) / len(signatures))
+
+                    status_text.empty()
+                    progress_bar.empty()
+
+                    if suggestions_made:
+                        st.success(f"✅ Generated suggestions for {len(st.session_state.gene_addition_suggestions)} signatures")
+                        st.info("💡 Review suggestions in Layer 5 (Approval)")
+                    else:
+                        st.warning("⚠️ No confident additions found. Try lowering the threshold.")
+
+                except Exception as e:
+                    st.error(f"❌ Failed to connect to database API: {e}")
+
 
 # ============================================================
 # LAYER 5 - TEXT-BASED GENE SELECTION
@@ -2377,14 +2593,29 @@ def render_layer5_approval_text_based():
             selected_list = sorted(list(selected_genes))
             st.caption(f"**Selected ({len(selected_list)} genes):** {', '.join(selected_list)}")
             
-            # Add suggested genes
+            # Add suggested genes from LLM2
             if sig_suggestions.get('genes_to_add'):
-                st.markdown("**Suggested Additions:**")
-                
+                st.markdown("**💡 LLM Suggested Additions:**")
+
                 suggested_cols = st.columns(len(sig_suggestions['genes_to_add']))
                 for col_idx, gene in enumerate(sig_suggestions['genes_to_add']):
                     with suggested_cols[col_idx]:
                         add_key = f"add_{sig.signature_id}_{gene}"
+                        if st.button(f"➕ {gene}", key=add_key, use_container_width=True):
+                            selected_genes.add(gene)
+                            st.rerun()
+
+            # Show gene addition suggestions from debate system
+            if sig.signature_id in st.session_state.get('gene_addition_suggestions', {}):
+                addition_suggestions = st.session_state.gene_addition_suggestions[sig.signature_id]
+
+                st.markdown("**💡 Network-Based Addition Suggestions (from DAM):**")
+                st.caption("High-confidence neighbors from gene-gene network")
+
+                suggested_cols = st.columns(min(len(addition_suggestions), 5))
+                for col_idx, gene in enumerate(addition_suggestions):
+                    with suggested_cols[col_idx]:
+                        add_key = f"add_debate_{sig.signature_id}_{gene}"
                         if st.button(f"➕ {gene}", key=add_key, use_container_width=True):
                             selected_genes.add(gene)
                             st.rerun()
