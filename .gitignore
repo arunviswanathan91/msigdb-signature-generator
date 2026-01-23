@@ -65,3 +65,4 @@ tokens.txt
 *.tmp
 *.bak
 *~
+*.backup

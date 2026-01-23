@@ -36,7 +36,7 @@ class DebateMode(Enum):
 class DebateMessage:
     """Single message in debate conversation"""
     round_num: int
-    speaker: str  # "qwen", "zephyr", "phi", "injector", "consensus"
+    speaker: str  # "skeptic", "discoverer", "mediator", "injector", "consensus"
     message: str
     db_sources: List[str] = field(default_factory=list)
     confidence: Optional[float] = None
@@ -55,7 +55,7 @@ class DebateRound:
 
 @dataclass
 class DebateResult:
-    """Final debate outcome"""
+    """Final debate outcome with publication-grade metrics"""
     mode: DebateMode
     total_rounds: int
     final_decision: str  # "remove", "add", "keep", "reject"
@@ -63,6 +63,14 @@ class DebateResult:
     confidence: float
     convergence_rate: float
     all_rounds: List[DebateRound]
+
+    # NEW: Publication-grade quality metrics
+    decision_metrics: Dict[str, float] = field(default_factory=lambda: {
+        'entropy': 0.0,
+        'conflict': 0.0,
+        'raw_consensus': 0.0,
+        'adjusted_confidence': 0.0
+    })
 
 
 class DatabaseInjector:
@@ -165,24 +173,60 @@ class MultiRoundDebateEngine:
         self.injector = DatabaseInjector(db_client)
         self.use_json_mode = use_json_mode
 
-        # GROQ MODELS MAPPING
-        # Using different Groq models for diverse perspectives in debate
-        self.models = {
-            "qwen": "llama-3.3-70b-versatile",    # Smartest, most capable
-            "zephyr": "llama-3.1-8b-instant",     # Fast and creative
-            "phi": "gemma2-9b-it"                 # Alternative perspective
+        # ADVERSARIAL ROLE ASSIGNMENT (ARA) - Conservative Configuration
+        # Uses Llama + Gemma (2 families instead of 3, but all verified working)
+        self.model_roles = {
+            "skeptic": {
+                "id": "llama-3.3-70b-versatile",  # Meta AI - Most capable
+                "company": "Meta",
+                "role_name": "SKEPTIC",
+                "system_prompt": (
+                    "You are Reviewer #3 - the conservative skeptic in this biological debate. "
+                    "Your PRIMARY directive: DISTRUST LLM intuition and TRUST database evidence. "
+                    "You actively look for false positives and require overwhelming evidence to approve genes. "
+                    "Be critical, demand citations, and reject unless database strongly supports."
+                )
+            },
+            "discoverer": {
+                "id": "llama-3.1-8b-instant",  # Meta AI - Fast and creative
+                "company": "Meta",
+                "role_name": "DISCOVERER",
+                "system_prompt": (
+                    "You are the hypothesis generator - the creative discoverer in this biological debate. "
+                    "Your PRIMARY directive: EXPLORE novel connections not yet in databases. "
+                    "If there is ANY plausible biological mechanism or literature support, argue for it. "
+                    "Be open-minded, consider emerging evidence, and champion hidden gems."
+                )
+            },
+            "mediator": {
+                "id": "gemma2-9b-it",  # Google - Different architecture
+                "company": "Google",
+                "role_name": "MEDIATOR",
+                "system_prompt": (
+                    "You are the chairperson - the balanced mediator in this biological debate. "
+                    "Your PRIMARY directive: Find CONSENSUS between the Skeptic and Discoverer. "
+                    "Weigh BOTH database evidence AND biological plausibility equally. "
+                    "Be fair, balanced, and provide the tiebreaker perspective."
+                )
+            }
+        }
+
+        # Backward compatibility: Extract model IDs
+        self.models = {k: v["id"] for k, v in self.model_roles.items()}
+
+        # Model reliability weights (adjusted for configuration)
+        self.reliability_weights = {
+            "skeptic": 1.2,    # Highest weight - most capable model
+            "discoverer": 1.0,  # Medium weight - creative but needs validation
+            "mediator": 1.0     # Medium weight - tiebreaker
         }
 
         # Override with custom configs if provided
         if model_configs:
-            self.models.update(model_configs)
-
-        # Model reliability weights (can be tuned)
-        self.reliability_weights = {
-            "qwen": 1.2,
-            "zephyr": 1.0,
-            "phi": 0.9
-        }
+            for role, model_id in model_configs.items():
+                if role in self.model_roles:
+                    self.model_roles[role]["id"] = model_id
+                    self.models[role] = model_id
 
         # ✅ FIX BUG #2: Validate model availability
         if validate_models:
@@ -315,12 +359,13 @@ class MultiRoundDebateEngine:
             if convergence >= convergence_threshold:
                 break
         
-        # Meta-synthesizer makes final decision
+        # Meta-synthesizer makes final decision with metrics
+        self._last_decision_metrics = {}  # Initialize
         final_decision, confidence = self._synthesize_final_decision(
             all_rounds,
             mode=DebateMode.VALIDATION
         )
-        
+
         return DebateResult(
             mode=DebateMode.VALIDATION,
             total_rounds=len(all_rounds),
@@ -328,7 +373,8 @@ class MultiRoundDebateEngine:
             affected_genes=list(current_genes_to_remove),
             confidence=confidence,
             convergence_rate=all_rounds[-1].convergence_rate,
-            all_rounds=all_rounds
+            all_rounds=all_rounds,
+            decision_metrics=getattr(self, '_last_decision_metrics', {})
         )
     
     async def run_expansion_debate(
@@ -388,14 +434,15 @@ class MultiRoundDebateEngine:
             if convergence >= convergence_threshold:
                 break
         
-        # Final decision
+        # Final decision with metrics
+        self._last_decision_metrics = {}  # Initialize
         final_decision, confidence = self._synthesize_final_decision(
             all_rounds,
             mode=DebateMode.EXPANSION
         )
-        
+
         affected_genes = [candidate_gene] if final_decision == "add" else []
-        
+
         return DebateResult(
             mode=DebateMode.EXPANSION,
             total_rounds=len(all_rounds),
@@ -403,7 +450,8 @@ class MultiRoundDebateEngine:
             affected_genes=affected_genes,
             confidence=confidence,
             convergence_rate=all_rounds[-1].convergence_rate,
-            all_rounds=all_rounds
+            all_rounds=all_rounds,
+            decision_metrics=getattr(self, '_last_decision_metrics', {})
         )
     
     async def _collect_llm_responses_validation(
@@ -416,28 +464,35 @@ class MultiRoundDebateEngine:
         """
         Collect responses from all 3 LLMs for validation debate.
         """
-        # Build conversation history
-        history = self._build_conversation_history(previous_rounds)
-        
-        # Add injector context if present
+        # 1. Prepare CURRENT round messages (Injector + Prompt)
+        # We don't build full history here yet, as it needs to be role-specific
+        current_round_msgs = []
+
         if injector_context:
-            history.append({
+            current_round_msgs.append({
                 "role": "user",
                 "content": injector_context.message
             })
-        
-        # Prompt for this round
+
         prompt = self._build_validation_prompt(genes, round_num)
-        history.append({
+        current_round_msgs.append({
             "role": "user",
             "content": prompt
         })
-        
-        # Query all LLMs in parallel
-        tasks = [
-            self._query_llm_async(model_name, model_id, history, use_json=self.use_json_mode)
-            for model_name, model_id in self.models.items()
-        ]
+
+        # 2. Query all LLMs in parallel with role-specific system prompts
+        tasks = []
+        for model_name, model_id in self.models.items():
+            # Build role-specific history (System Prompt + Previous Rounds)
+            role_history = self._build_conversation_history_with_roles(
+                previous_rounds, model_name
+            )
+            # Add current round context
+            role_history.extend(current_round_msgs)  # ✅ FIXED: Uses current_round_msgs
+
+            tasks.append(
+                self._query_llm_async(model_name, model_id, role_history, use_json=self.use_json_mode)
+            )
         
         responses = await asyncio.gather(*tasks, return_exceptions=True)
         
@@ -470,24 +525,34 @@ class MultiRoundDebateEngine:
         """
         Collect LLM responses for expansion debate.
         """
-        history = self._build_conversation_history(previous_rounds)
-        
+        # 1. Prepare CURRENT round messages
+        current_round_msgs = []
+
         if injector_context:
-            history.append({
+            current_round_msgs.append({
                 "role": "user",
                 "content": injector_context.message
             })
-        
+
         prompt = self._build_expansion_prompt(candidate_gene, round_num)
-        history.append({
+        current_round_msgs.append({
             "role": "user",
             "content": prompt
         })
-        
-        tasks = [
-            self._query_llm_async(model_name, model_id, history, use_json=self.use_json_mode)
-            for model_name, model_id in self.models.items()
-        ]
+
+        # 2. Query all LLMs in parallel with role-specific system prompts
+        tasks = []
+        for model_name, model_id in self.models.items():
+            # Build role-specific history
+            role_history = self._build_conversation_history_with_roles(
+                previous_rounds, model_name
+            )
+            # Add current round context
+            role_history.extend(current_round_msgs)  # ✅ FIXED: Uses current_round_msgs
+
+            tasks.append(
+                self._query_llm_async(model_name, model_id, role_history, use_json=self.use_json_mode)
+            )
 
         responses = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -519,7 +584,7 @@ class MultiRoundDebateEngine:
         Async LLM query via Groq API (OpenAI-compatible).
 
         Args:
-            model_name: Human-readable model name (qwen, zephyr, phi)
+            model_name: Human-readable model name (skeptic, discoverer, mediator)
             model_id: Groq model ID
             conversation_history: Chat messages
             use_json: Force JSON output format (requires JSON prompt)
@@ -625,7 +690,43 @@ Reasoning: Why?
 Confidence: 0-1"""
         else:
             return f"""Round {round_num}: Continue debating {candidate_gene}. Updated vote?"""
-    
+
+    def _build_conversation_history_with_roles(
+        self,
+        previous_rounds: List[DebateRound],
+        current_role: str
+    ) -> List[Dict]:
+        """
+        Build conversation history with role-specific system prompt.
+
+        Args:
+            previous_rounds: Previous debate rounds
+            current_role: 'skeptic', 'discoverer', or 'mediator'
+
+        Returns:
+            Conversation history with role-aware system prompt
+        """
+        history = []
+
+        # Add role-specific system prompt at the beginning
+        if current_role in self.model_roles:
+            role_info = self.model_roles[current_role]
+            history.append({
+                "role": "system",
+                "content": role_info["system_prompt"]
+            })
+
+        # Add previous rounds
+        for debate_round in previous_rounds:
+            for msg in debate_round.messages:
+                role = "assistant" if msg.speaker in self.models else "user"
+                history.append({
+                    "role": role,
+                    "content": msg.message
+                })
+
+        return history
+
     def _build_conversation_history(
         self,
         previous_rounds: List[DebateRound]
@@ -777,80 +878,170 @@ Confidence: 0-1"""
         mode: DebateMode
     ) -> Tuple[str, float]:
         """
-        Meta-synthesizer: Make final decision based on all rounds.
-        
-        Uses weighted voting:
-        - Model reliability weight
-        - Confidence score
-        - Recency (later rounds weighted higher)
-        
+        PUBLICATION-GRADE: Entropy-adjusted consensus with conflict discounting.
+
+        Mathematical Model:
+        1. Shannon Entropy: Measures model uncertainty
+        2. Vote Variance: Measures inter-model conflict
+        3. Final Score: Weighted consensus discounted by uncertainty + conflict
+
+        Novel Contribution: Quantifies "hallucination gap" when LLMs ignore database.
+
         Returns:
             (decision, confidence)
         """
+        import numpy as np
+
         if mode == DebateMode.VALIDATION:
-            # Aggregate votes for gene removal
+            # Aggregate votes for gene removal across ALL rounds
             gene_scores = {}
-            
+
             for round_idx, debate_round in enumerate(all_rounds):
+                # Recency weight: Later rounds matter more (converged opinions)
                 recency_weight = 1.0 + (round_idx / len(all_rounds)) * 0.5
-                
+
                 for msg in debate_round.messages:
                     if msg.speaker not in self.models:
                         continue
-                    
+
                     reliability = self.reliability_weights.get(msg.speaker, 1.0)
                     confidence = msg.confidence or 0.5
-                    
+
                     # Parse genes mentioned
                     votes = self._parse_removal_votes([msg])
-                    
+
                     for gene, vote_conf in votes.items():
                         weight = reliability * confidence * recency_weight
-                        
+
                         if gene not in gene_scores:
                             gene_scores[gene] = 0.0
                         gene_scores[gene] += weight
-            
-            # Normalize scores
+
+            # Extract final round for entropy calculation
+            last_round = all_rounds[-1]
+            confidences = [
+                (msg.confidence or 0.5) * self.reliability_weights.get(msg.speaker, 1.0)
+                for msg in last_round.messages
+                if msg.speaker in self.models
+            ]
+
+            # METRIC 1: Shannon Entropy (Uncertainty)
+            if confidences:
+                probs = np.array(confidences) / np.sum(confidences)
+                entropy = -np.sum(probs * np.log2(probs + 1e-10))
+                max_entropy = np.log2(len(confidences))
+                normalized_entropy = entropy / max_entropy if max_entropy > 0 else 0.0
+            else:
+                normalized_entropy = 1.0  # Maximum uncertainty
+
+            # METRIC 2: Vote Variance (Conflict)
+            # Extract binary votes (1=remove, 0=keep) from last round
+            binary_votes = [
+                1.0 if self._parse_removal_votes([msg]) else 0.0
+                for msg in last_round.messages
+                if msg.speaker in self.models
+            ]
+
+            if len(binary_votes) > 1:
+                vote_variance = np.var(binary_votes)
+                conflict_penalty = 1.0 - (vote_variance * 4)  # Scale to [0,1]
+            else:
+                conflict_penalty = 1.0
+
+            # Normalize gene scores
             if gene_scores:
                 max_score = max(gene_scores.values())
                 gene_scores = {g: s/max_score for g, s in gene_scores.items()}
-            
-            # Threshold: remove if score > 0.6
-            genes_to_remove = [g for g, s in gene_scores.items() if s > 0.6]
-            
+
+            # Threshold: remove if score > 0.6, but discount by uncertainty
+            genes_to_remove = [
+                g for g, s in gene_scores.items()
+                if s > 0.6
+            ]
+
             if genes_to_remove:
+                # Average confidence of removal votes
                 avg_confidence = sum(gene_scores[g] for g in genes_to_remove) / len(genes_to_remove)
-                return "remove", avg_confidence
+
+                # Apply uncertainty discount
+                final_confidence = avg_confidence * conflict_penalty * (1.0 - normalized_entropy * 0.3)
+
+                # Store metrics for export (PUBLICATION DATA)
+                self._last_decision_metrics = {
+                    'entropy': float(normalized_entropy),
+                    'conflict': float(vote_variance) if len(binary_votes) > 1 else 0.0,
+                    'raw_consensus': float(avg_confidence),
+                    'adjusted_confidence': float(final_confidence)
+                }
+
+                return "remove", final_confidence
             else:
+                self._last_decision_metrics = {
+                    'entropy': float(normalized_entropy),
+                    'conflict': float(vote_variance) if len(binary_votes) > 1 else 0.0,
+                    'raw_consensus': 0.7,
+                    'adjusted_confidence': 0.7
+                }
                 return "keep", 0.7
-        
-        else:  # EXPANSION
-            # Count ADD vs REJECT votes
-            add_score = 0.0
-            reject_score = 0.0
-            
-            for round_idx, debate_round in enumerate(all_rounds):
-                recency_weight = 1.0 + (round_idx / len(all_rounds)) * 0.5
-                
-                for msg in debate_round.messages:
-                    if msg.speaker not in self.models:
-                        continue
-                    
-                    reliability = self.reliability_weights.get(msg.speaker, 1.0)
-                    confidence = msg.confidence or 0.5
-                    weight = reliability * confidence * recency_weight
-                    
-                    lower_msg = msg.message.lower()
-                    if 'add' in lower_msg or 'include' in lower_msg:
-                        add_score += weight
-                    elif 'reject' in lower_msg or 'exclude' in lower_msg:
-                        reject_score += weight
-            
-            if add_score > reject_score:
-                return "add", add_score / (add_score + reject_score)
+
+        else:  # EXPANSION mode
+            # Extract final round data
+            last_round = all_rounds[-1]
+
+            confidences = []
+            votes = []  # 1=add, 0=reject
+
+            for msg in last_round.messages:
+                if msg.speaker not in self.models:
+                    continue
+
+                reliability = self.reliability_weights.get(msg.speaker, 1.0)
+                conf = (msg.confidence or 0.5) * reliability
+                confidences.append(conf)
+
+                # Binary vote
+                lower_msg = msg.message.lower()
+                vote = 1.0 if ('add' in lower_msg or 'include' in lower_msg) else 0.0
+                votes.append(vote)
+
+            if not confidences:
+                self._last_decision_metrics = {
+                    'entropy': 1.0,
+                    'conflict': 1.0,
+                    'raw_consensus': 0.5,
+                    'adjusted_confidence': 0.5
+                }
+                return "reject", 0.5
+
+            # METRIC 1: Shannon Entropy
+            probs = np.array(confidences) / np.sum(confidences)
+            entropy = -np.sum(probs * np.log2(probs + 1e-10))
+            max_entropy = np.log2(len(confidences))
+            normalized_entropy = entropy / max_entropy if max_entropy > 0 else 0.0
+
+            # METRIC 2: Vote Variance
+            vote_variance = np.var(votes) if len(votes) > 1 else 0.0
+            conflict_penalty = 1.0 - (vote_variance * 4)
+
+            # Weighted consensus
+            weighted_vote = np.average(votes, weights=confidences)
+
+            # Final score with uncertainty discount
+            final_confidence = weighted_vote * conflict_penalty * (1.0 - normalized_entropy * 0.3)
+
+            # Store metrics
+            self._last_decision_metrics = {
+                'entropy': float(normalized_entropy),
+                'conflict': float(vote_variance),
+                'raw_consensus': float(weighted_vote),
+                'adjusted_confidence': float(final_confidence)
+            }
+
+            # Decision
+            if final_confidence > 0.6:
+                return "add", final_confidence
             else:
-                return "reject", reject_score / (add_score + reject_score)
+                return "reject", 1.0 - final_confidence
     
     def _extract_confidence(self, text: str) -> float:
         """Extract confidence score from LLM response"""
