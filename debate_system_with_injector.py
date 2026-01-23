@@ -199,7 +199,7 @@ class MultiRoundDebateEngine:
                 )
             },
             "mediator": {
-                "id": "gemma2-9b-it",  # Google - Different architecture
+                "id": "gemma-7b-it",  # Google - Active model
                 "company": "Google",
                 "role_name": "MEDIATOR",
                 "system_prompt": (
