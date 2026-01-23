@@ -199,8 +199,8 @@ class MultiRoundDebateEngine:
                 )
             },
             "mediator": {
-                "id": "gemma-7b-it",  # Google - Active model
-                "company": "Google",
+                "id": "openai/gpt-oss-20b",
+                "company": "OpenAI",
                 "role_name": "MEDIATOR",
                 "system_prompt": (
                     "You are the chairperson - the balanced mediator in this biological debate. "

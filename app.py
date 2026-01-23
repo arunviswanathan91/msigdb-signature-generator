@@ -112,17 +112,20 @@ def render_debate_message_simple(speaker: str, message: str, db_sources: list = 
     """
     Simple debate message display with error detection.
 
-    ✅ FIX BUG #3: Detects error messages and displays them distinctly
+    ✅ FIXED: Properly escapes HTML to prevent rendering issues
+    ✅ FIXED: Uses native Streamlit components for better display
     """
+    import html
+
     speaker_map = {
-        'skeptic': ('🔬 Skeptic (Meta Llama 70B)', 'skeptic'),
-        'discoverer': ('💡 Discoverer (Meta Llama 8B)', 'discoverer'),
-        'mediator': ('⚖️ Mediator (Google Gemma 9B)', 'mediator'),
-        'injector': ('💉 Database Evidence', 'injector'),
-        'consensus': ('🎯 Final Consensus', 'consensus')
+        'skeptic': ('🔬 Skeptic (Meta Llama 70B)', 'rgba(255, 107, 157, 0.1)', '#FF6B9D'),
+        'discoverer': ('💡 Discoverer (Meta Llama 8B)', 'rgba(78, 205, 196, 0.1)', '#4ECDC4'),
+        'mediator': ('⚖️ Mediator (OpenAI GPT-OSS 20B)', 'rgba(255, 217, 61, 0.1)', '#FFD93D'),
+        'injector': ('💉 Database Evidence', 'rgba(155, 89, 182, 0.15)', '#9B59B6'),
+        'consensus': ('🎯 Final Consensus', 'rgba(46, 204, 113, 0.15)', '#2ECC71')
     }
 
-    label, css_class = speaker_map.get(speaker, ('💬 Unknown', 'qwen'))
+    label, bg_color, border_color = speaker_map.get(speaker, ('💬 Unknown', 'rgba(200,200,200,0.1)', '#888'))
 
     # ✅ Detect if this is an error message
     is_error = (
@@ -133,31 +136,39 @@ def render_debate_message_simple(speaker: str, message: str, db_sources: list = 
     )
 
     if is_error:
-        # Display as error with red styling
-        st.markdown(f"""
-        <div style='background: rgba(235, 0, 20, 0.1); border-left: 4px solid #EB0014;
-                    padding: 1rem; border-radius: 8px; margin: 0.5rem 0;'>
-            <strong>❌ {label} (FAILED)</strong><br>
-            <code style='color: #EB0014; background: rgba(0,0,0,0.05);
-                        padding: 0.5rem; display: block; margin-top: 0.5rem;
-                        border-radius: 4px; white-space: pre-wrap;'>{message}</code>
-        </div>
-        """, unsafe_allow_html=True)
+        # Display as error with native Streamlit error box
+        st.error(f"**{label} (FAILED)**\n\n{message}")
         return
 
-    # Normal message display
+    # ✅ Escape HTML in the message to prevent rendering issues
+    safe_message = html.escape(message)
+
+    # Build sources display
     sources_html = ""
     if db_sources:
-        sources_html = f'<small style="color: #666;">📊 {", ".join(db_sources)}</small><br>'
+        sources_list = ", ".join(db_sources)
+        sources_html = f'<small style="color: #888;">📊 {html.escape(sources_list)}</small><br>'
 
-    # Sanitize message to remove HTML/markdown tags
-    display_message = sanitize_llm_response(message) if len(message) <= 500 else sanitize_llm_response(message[:500]) + "..."
+    # Truncate long messages
+    display_message = safe_message if len(safe_message) <= 500 else safe_message[:500] + "..."
 
+    # ✅ Use <pre> tag with proper escaping to preserve formatting
     st.markdown(f"""
-    <div class="debate-message debate-{css_class}">
+    <div style='background: {bg_color};
+                border-left: 4px solid {border_color};
+                padding: 1rem;
+                border-radius: 8px;
+                margin: 0.5rem 0;'>
         <strong>{label}</strong><br>
         {sources_html}
-        <div style="margin-top: 0.5rem; color: #666;">{display_message}</div>
+        <pre style="margin-top: 0.5rem;
+                    color: #666;
+                    white-space: pre-wrap;
+                    font-family: inherit;
+                    background: transparent;
+                    border: none;
+                    padding: 0;
+                    font-size: inherit;">{display_message}</pre>
     </div>
     """, unsafe_allow_html=True)
 # NEW: Debate system imports
