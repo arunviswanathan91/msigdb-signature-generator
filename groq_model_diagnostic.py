@@ -49,9 +49,9 @@ async def diagnose_groq_models(api_key: str) -> dict:
 
     # Step 2: Test specific models used in debate system
     debate_models = {
-        "qwen": "llama-3.3-70b-versatile",
-        "zephyr": "llama-3.1-8b-instant",
-        "phi": "gemma2-9b-it"  # This might be wrong!
+        "skeptic": "llama-3.3-70b-versatile",
+        "discoverer": "llama-3.1-70b-versatile",
+        "mediator": "llama-3.2-90b-text-preview"
     }
 
     print("\n🧪 Testing debate system models...")

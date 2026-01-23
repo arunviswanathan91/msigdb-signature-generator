@@ -188,7 +188,7 @@ class MultiRoundDebateEngine:
                 )
             },
             "discoverer": {
-                "id": "llama-3.1-8b-instant",  # Meta AI - Fast and creative
+                "id": "llama-3.1-70b-versatile",  # Meta AI - Upgraded to 70B for larger context
                 "company": "Meta",
                 "role_name": "DISCOVERER",
                 "system_prompt": (
@@ -199,8 +199,8 @@ class MultiRoundDebateEngine:
                 )
             },
             "mediator": {
-                "id": "openai/gpt-oss-20b",
-                "company": "OpenAI",
+                "id": "llama-3.2-90b-text-preview",  # Active Llama model (replaces decommissioned gemma2-9b-it)
+                "company": "Meta",
                 "role_name": "MEDIATOR",
                 "system_prompt": (
                     "You are the chairperson - the balanced mediator in this biological debate. "
@@ -593,6 +593,10 @@ class MultiRoundDebateEngine:
             RuntimeError: If the model query fails
         """
         try:
+            # ✅ NEW: Estimate token usage for debugging
+            token_estimate = sum(len(m["content"]) for m in conversation_history) // 4
+            print(f"   📊 {model_name}: ~{token_estimate} tokens in context")
+
             # Prepare API call parameters
             api_params = {
                 "model": model_id,
@@ -703,6 +707,67 @@ Confidence: 0-1"""
         else:
             return f"""Round {round_num}: Continue debating {candidate_gene}. Updated vote?"""
 
+    def _truncate_conversation_history(
+        self,
+        history: List[Dict],
+        max_tokens: int = 4000
+    ) -> List[Dict]:
+        """
+        Truncate conversation history to fit within token budget.
+
+        Strategy:
+        1. Always keep system prompt (first message)
+        2. Always keep most recent round
+        3. Keep as many previous rounds as possible within budget
+
+        Args:
+            history: Full conversation history
+            max_tokens: Maximum token budget (default: 4000)
+
+        Returns:
+            Truncated conversation history
+        """
+        if not history:
+            return history
+
+        # Estimate tokens (rough: 1 token ≈ 4 characters)
+        def estimate_tokens(text: str) -> int:
+            return len(text) // 4
+
+        # Always keep system prompt
+        system_prompt = history[0] if history[0]["role"] == "system" else None
+        messages = history[1:] if system_prompt else history
+
+        # Always keep last round (most recent context)
+        if len(messages) >= 2:
+            recent_messages = messages[-2:]  # Last injector + LLM response
+        else:
+            recent_messages = messages
+
+        # Calculate remaining budget
+        used_tokens = sum(estimate_tokens(m["content"]) for m in recent_messages)
+        if system_prompt:
+            used_tokens += estimate_tokens(system_prompt["content"])
+
+        remaining_budget = max_tokens - used_tokens
+
+        # Add older messages until budget exhausted
+        truncated = []
+        if system_prompt:
+            truncated.append(system_prompt)
+
+        for msg in reversed(messages[:-len(recent_messages)] if recent_messages else messages):
+            msg_tokens = estimate_tokens(msg["content"])
+            if msg_tokens <= remaining_budget:
+                truncated.insert(1 if system_prompt else 0, msg)
+                remaining_budget -= msg_tokens
+            else:
+                break  # Stop adding older messages
+
+        truncated.extend(recent_messages)
+
+        return truncated
+
     def _build_conversation_history_with_roles(
         self,
         previous_rounds: List[DebateRound],
@@ -736,6 +801,9 @@ Confidence: 0-1"""
                     "role": role,
                     "content": msg.message
                 })
+
+        # ✅ NEW: Truncate to fit within token budget
+        history = self._truncate_conversation_history(history, max_tokens=4000)
 
         return history
 
@@ -931,10 +999,29 @@ Confidence: 0-1"""
 
             # Extract final round for entropy calculation
             last_round = all_rounds[-1]
+            successful_responses = [
+                msg for msg in last_round.messages
+                if msg.speaker in self.models and msg.message.strip()
+            ]
+
+            # ✅ NEW: Handle case where all models failed
+            if len(successful_responses) == 0:
+                print("⚠️ WARNING: All models failed in final round")
+                self._last_decision_metrics = {
+                    'entropy': 1.0,
+                    'conflict': 1.0,
+                    'raw_consensus': 0.0,
+                    'adjusted_confidence': 0.0
+                }
+                return "keep", 0.0  # Default to keeping signature
+
+            # ✅ NEW: Warn if only 1 model responded
+            if len(successful_responses) == 1:
+                print(f"⚠️ WARNING: Only {successful_responses[0].speaker} responded")
+
             confidences = [
                 (msg.confidence or 0.5) * self.reliability_weights.get(msg.speaker, 1.0)
-                for msg in last_round.messages
-                if msg.speaker in self.models
+                for msg in successful_responses
             ]
 
             # METRIC 1: Shannon Entropy (Uncertainty)
@@ -950,8 +1037,7 @@ Confidence: 0-1"""
             # Extract binary votes (1=remove, 0=keep) from last round
             binary_votes = [
                 1.0 if self._parse_removal_votes([msg]) else 0.0
-                for msg in last_round.messages
-                if msg.speaker in self.models
+                for msg in successful_responses
             ]
 
             if len(binary_votes) > 1:
@@ -999,14 +1085,30 @@ Confidence: 0-1"""
         else:  # EXPANSION mode
             # Extract final round data
             last_round = all_rounds[-1]
+            successful_responses = [
+                msg for msg in last_round.messages
+                if msg.speaker in self.models and msg.message.strip()
+            ]
+
+            # ✅ NEW: Handle case where all models failed
+            if len(successful_responses) == 0:
+                print("⚠️ WARNING: All models failed in final round")
+                self._last_decision_metrics = {
+                    'entropy': 1.0,
+                    'conflict': 1.0,
+                    'raw_consensus': 0.0,
+                    'adjusted_confidence': 0.0
+                }
+                return "reject", 0.0  # Default to rejecting candidate
+
+            # ✅ NEW: Warn if only 1 model responded
+            if len(successful_responses) == 1:
+                print(f"⚠️ WARNING: Only {successful_responses[0].speaker} responded")
 
             confidences = []
             votes = []  # 1=add, 0=reject
 
-            for msg in last_round.messages:
-                if msg.speaker not in self.models:
-                    continue
-
+            for msg in successful_responses:
                 reliability = self.reliability_weights.get(msg.speaker, 1.0)
                 conf = (msg.confidence or 0.5) * reliability
                 confidences.append(conf)
