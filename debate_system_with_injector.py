@@ -24,6 +24,13 @@ from enum import Enum
 import re
 import time
 from openai import AsyncOpenAI  # CHANGED: Use OpenAI Client for Groq
+from model_registry import (
+    GROQ_BASE_URL,
+    DEBATE_PREFERENCE,
+    fetch_available_models,
+    resolve_debate_models,
+    describe_model,
+)
 
 
 class DebateMode(Enum):
@@ -154,7 +161,7 @@ class MultiRoundDebateEngine:
         self,
         api_key: str,
         db_client,
-        base_url: str = "https://api.groq.com/openai/v1",
+        base_url: str = GROQ_BASE_URL,
         model_configs: Optional[Dict] = None,
         validate_models: bool = True,
         use_json_mode: bool = False
@@ -173,12 +180,15 @@ class MultiRoundDebateEngine:
         self.injector = DatabaseInjector(db_client)
         self.use_json_mode = use_json_mode
 
-        # ADVERSARIAL ROLE ASSIGNMENT (ARA) - Conservative Configuration
-        # Uses Llama + Gemma (2 families instead of 3, but all verified working)
+        # ADVERSARIAL ROLE ASSIGNMENT (ARA)
+        # Model IDs are NOT hardcoded here. They are resolved below from
+        # live discovery, or supplied by the caller via model_configs.
+        # Every ID that used to sit in this dict has since been retired
+        # by Groq - see model_registry.py.
         self.model_roles = {
             "skeptic": {
-                "id": "llama-3.3-70b-versatile",  # Meta AI - Most capable
-                "company": "Meta",
+                "id": None,  # resolved at runtime
+                "company": None,
                 "role_name": "SKEPTIC",
                 "system_prompt": (
                     "You are Reviewer #3 - the conservative skeptic in this biological debate. "
@@ -188,8 +198,8 @@ class MultiRoundDebateEngine:
                 )
             },
             "discoverer": {
-                "id": "llama-3.1-70b-versatile",  # Meta AI - Upgraded to 70B for larger context
-                "company": "Meta",
+                "id": None,  # resolved at runtime
+                "company": None,
                 "role_name": "DISCOVERER",
                 "system_prompt": (
                     "You are the hypothesis generator - the creative discoverer in this biological debate. "
@@ -199,8 +209,8 @@ class MultiRoundDebateEngine:
                 )
             },
             "mediator": {
-                "id": "llama-3.2-90b-text-preview",  # Active Llama model (replaces decommissioned gemma2-9b-it)
-                "company": "Meta",
+                "id": None,  # resolved at runtime
+                "company": None,
                 "role_name": "MEDIATOR",
                 "system_prompt": (
                     "You are the chairperson - the balanced mediator in this biological debate. "
@@ -222,11 +232,29 @@ class MultiRoundDebateEngine:
         }
 
         # Override with custom configs if provided
-        if model_configs:
-            for role, model_id in model_configs.items():
-                if role in self.model_roles:
-                    self.model_roles[role]["id"] = model_id
-                    self.models[role] = model_id
+        # Resolve model IDs. Caller-supplied config wins; otherwise ask the
+        # provider what is actually live right now. Nothing is hardcoded.
+        if not model_configs:
+            try:
+                model_configs = resolve_debate_models(fetch_available_models(api_key))
+            except Exception as e:
+                raise RuntimeError(
+                    "Could not discover Groq models for the debate system: "
+                    f"{e}. Pass model_configs={{'skeptic': ..., 'discoverer': ..., "
+                    "'mediator': ...}} to override."
+                )
+
+        for role, model_id in model_configs.items():
+            if role in self.model_roles:
+                self.model_roles[role]["id"] = model_id
+                self.models[role] = model_id
+                self.model_roles[role]["company"] = describe_model(model_id)
+
+        missing = [r for r, cfg in self.model_roles.items() if not cfg["id"]]
+        if missing:
+            raise RuntimeError(
+                f"No model resolved for debate role(s): {', '.join(missing)}"
+            )
 
         # ✅ FIX BUG #2: Validate model availability
         if validate_models:

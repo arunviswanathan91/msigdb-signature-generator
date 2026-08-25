@@ -24,7 +24,7 @@ NEW - DEBATE SYSTEM:
 ✅ Multi-round AI debate for signature validation
 ✅ Database-grounded evidence injection
 ✅ Material UI conversational chat interface
-✅ 3 LLMs: Qwen, Zephyr, Phi-3
+✅ 3 LLMs, selected live from your Groq account (no hardcoded model IDs)
 ✅ Weighted voting & convergence tracking
 
 PERFORMANCE:
@@ -56,6 +56,60 @@ import re
 # Original imports
 from db_client import DatabaseClient
 from cache_client import SearchCacheClient
+
+# Model discovery - no Groq model ID is ever hardcoded in this file.
+# See model_registry.py for why.
+from model_registry import (
+    GROQ_BASE_URL,
+    MSIGDB_API_URL,
+    MSIGDB_SPACE_URL,
+    WAKE_BACKEND_HINT,
+    REASONING_PREFERENCE,
+    FAST_PREFERENCE,
+    fetch_available_models,
+    pick_default,
+    resolve_debate_models,
+    next_fallback,
+    describe_model,
+    explain_llm_error,
+    is_model_not_found,
+)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_available_models(api_key: str) -> List[str]:
+    """Cached model discovery. Sidebar 'Refresh model list' clears this."""
+    return fetch_available_models(api_key)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def backend_health(api_url: str = MSIGDB_API_URL) -> bool:
+    """
+    True if the pathway API Space is reachable.
+
+    Core signature generation does not need it; DAM expansion, gene addition
+    and the debate system do. Cached briefly so we do not probe on every rerun.
+    """
+    import requests
+    try:
+        return requests.get(api_url + "/", timeout=5).status_code == 200
+    except Exception:
+        return False
+
+
+def active_model(role: str = "reasoning") -> Optional[str]:
+    """
+    The model currently selected for a role, resolving a default if the user
+    has not chosen one. Never returns a hardcoded ID.
+    """
+    key = "model_reasoning" if role == "reasoning" else "model_fast"
+    chosen = st.session_state.get(key)
+    if chosen:
+        return chosen
+
+    available = st.session_state.get("available_models") or []
+    preference = REASONING_PREFERENCE if role == "reasoning" else FAST_PREFERENCE
+    return pick_default(available, preference)
 
 
 def sanitize_llm_response(text: str) -> str:
@@ -117,10 +171,18 @@ def render_debate_message_simple(speaker: str, message: str, db_sources: list = 
     """
     import html
 
+    # Labels reflect the models actually resolved for this debate, so they
+    # cannot drift out of sync with the models being used.
+    _debate_models = st.session_state.get('debate_models') or {}
+
+    def _label(role: str, icon: str, name: str) -> str:
+        model_id = _debate_models.get(role)
+        return f"{icon} {name} ({describe_model(model_id)})" if model_id else f"{icon} {name}"
+
     speaker_map = {
-        'skeptic': ('🔬 Skeptic (Meta Llama 70B)', 'rgba(255, 107, 157, 0.1)', '#FF6B9D'),
-        'discoverer': ('💡 Discoverer (Meta Llama 8B)', 'rgba(78, 205, 196, 0.1)', '#4ECDC4'),
-        'mediator': ('⚖️ Mediator (OpenAI GPT-OSS 20B)', 'rgba(255, 217, 61, 0.1)', '#FFD93D'),
+        'skeptic': (_label('skeptic', '🔬', 'Skeptic'), 'rgba(255, 107, 157, 0.1)', '#FF6B9D'),
+        'discoverer': (_label('discoverer', '💡', 'Discoverer'), 'rgba(78, 205, 196, 0.1)', '#4ECDC4'),
+        'mediator': (_label('mediator', '⚖️', 'Mediator'), 'rgba(255, 217, 61, 0.1)', '#FFD93D'),
         'injector': ('💉 Database Evidence', 'rgba(155, 89, 182, 0.15)', '#9B59B6'),
         'consensus': ('🎯 Final Consensus', 'rgba(46, 204, 113, 0.15)', '#2ECC71')
     }
@@ -671,19 +733,33 @@ def fast_semantic_search(
 def decompose_with_granularity(
     query: str,
     granularity_count: int,
-    groq_api_key: str
+    groq_api_key: str,
+    model: str = None
 ) -> Optional[DecompositionResult]:
-    """Use Groq's Llama 3.3 70B to decompose query into EXACTLY N mechanisms"""
+    """
+    Decompose a query into EXACTLY N mechanisms using the selected Groq model.
+
+    The model is resolved at runtime from live discovery (see model_registry).
+    If it turns out to be retired mid-flight we retry once against the next
+    live model rather than failing the whole layer.
+    """
 
     try:
         # Use OpenAI client with Groq base URL
         client = OpenAI(
             api_key=groq_api_key,
-            base_url="https://api.groq.com/openai/v1"
+            base_url=GROQ_BASE_URL
         )
 
-        # Use Llama 3.3 70B - Groq's most capable model
-        model = "llama-3.3-70b-versatile"
+        # Resolved from the sidebar selection / live discovery - never hardcoded
+        model = model or active_model("reasoning")
+        if not model:
+            st.error(
+                "**No model selected**\n\n"
+                "Validate your Groq API key in the sidebar first so the app can "
+                "discover which models are available."
+            )
+            return None
 
         prompt = f"""Decompose this biological query into EXACTLY {granularity_count} SPECIFIC, NON-OVERLAPPING molecular mechanisms.
 
@@ -707,15 +783,39 @@ Output JSON ONLY (no preamble, no markdown):
   ]
 }}"""
 
-        response = client.chat.completions.create(
-            messages=[{"role": "user", "content": prompt}],
-            model=model,
-            max_tokens=3000,
-            temperature=0.3
-        )
+        try:
+            response = client.chat.completions.create(
+                messages=[{"role": "user", "content": prompt}],
+                model=model,
+                max_tokens=3000,
+                temperature=0.3
+            )
+        except Exception as first_error:
+            # A retired model should not kill the layer. Retry once on the next
+            # live model and tell the user what happened.
+            if not is_model_not_found(first_error):
+                raise
+
+            available = st.session_state.get('available_models') or []
+            fallback = next_fallback(model, available, REASONING_PREFERENCE)
+            if not fallback:
+                raise
+
+            st.warning(
+                f"`{model}` is no longer available on Groq. "
+                f"Retrying with `{fallback}`."
+            )
+            model = fallback
+            st.session_state.model_reasoning = fallback
+            response = client.chat.completions.create(
+                messages=[{"role": "user", "content": prompt}],
+                model=model,
+                max_tokens=3000,
+                temperature=0.3
+            )
 
         raw = response.choices[0].message.content
-        
+
         # Parse JSON
         cleaned = raw.strip()
         if '```json' in cleaned:
@@ -741,7 +841,7 @@ Output JSON ONLY (no preamble, no markdown):
         )
 
     except Exception as e:
-        st.error(f"Groq decomposition failed: {e}")
+        st.error(explain_llm_error(e, model))
         return None
 
 
@@ -767,16 +867,26 @@ def verify_signatures_batch(
 
     all_suggestions = {}
 
+    # FIXED: previously this hardcoded a model and silently ignored llm2_model,
+    # so the Layer 4 dropdown had no effect at all. Hoisted above the try so the
+    # error handler can always name the model that failed.
+    model_id = llm2_model or active_model("reasoning")
+
     try:
         # Use OpenAI client with Groq
         client = OpenAI(
             api_key=groq_api_key,
-            base_url="https://api.groq.com/openai/v1"
+            base_url=GROQ_BASE_URL
         )
 
-        # Use Llama 3.3 70B for verification (best quality)
-        model_id = "llama-3.3-70b-versatile"
-        
+        if not model_id:
+            st.error(
+                "**No model selected**\n\n"
+                "Validate your Groq API key in the sidebar so the app can "
+                "discover available models."
+            )
+            return {}
+
         # NEW: Get biological context if available
         bio_context = st.session_state.get('bio_context')
         generation_mode = st.session_state.get('generation_mode', 'exploratory')
@@ -893,7 +1003,10 @@ If no changes needed, return empty lists."""
                         }
                         
             except Exception as e:
-                st.warning(f"Batch {batch_idx + 1}/{num_batches} failed: {e}")
+                st.warning(
+                    f"Batch {batch_idx + 1}/{num_batches} failed. "
+                    + explain_llm_error(e, model_id)
+                )
                 # Add empty suggestions for failed batch
                 for sig in batch:
                     all_suggestions[sig.signature_id] = {
@@ -905,7 +1018,7 @@ If no changes needed, return empty lists."""
         return all_suggestions
         
     except Exception as e:
-        st.error(f"Batch verification failed: {e}")
+        st.error(explain_llm_error(e, model_id))
         return {}
 
 
@@ -926,13 +1039,19 @@ def run_validation_debate_sync(
         return None
 
     try:
-        # Initialize debate engine with Groq API
-        # validate_models=False to avoid blocking on init
+        # Resolve three DISTINCT live models for the adversarial roles.
+        # Previously these were three hardcoded IDs, all of which were dead.
+        available = st.session_state.get('available_models') or []
+        debate_models = resolve_debate_models(available)
+        st.session_state.debate_models = debate_models
+
         debate_engine = MultiRoundDebateEngine(
             api_key=st.session_state.groq_api_key,
             db_client=st.session_state.db_client_enhanced,
-            base_url="https://api.groq.com/openai/v1",
-            validate_models=False  # Skip validation for faster init
+            base_url=GROQ_BASE_URL,
+            model_configs=debate_models,
+            # Safe to validate now that IDs come from live discovery.
+            validate_models=True
         )
 
         # Run async debate
@@ -1001,11 +1120,18 @@ def initialize_enhanced_db_client():
     
     if 'db_client_enhanced' not in st.session_state or st.session_state.db_client_enhanced is None:
         try:
-            api_url = "https://arunviswanathan91-msigdb-api.hf.space"
+            api_url = MSIGDB_API_URL
             st.session_state.db_client_enhanced = DatabaseClientEnhanced(api_url)
             return True
         except Exception as e:
-            st.error(f"Failed to initialize enhanced DB client: {e}")
+            st.error(
+                "**The debate system needs the pathway API, which is asleep "
+                "or offline.**\n\n"
+                + WAKE_BACKEND_HINT
+                + "\n\nCore signature generation is unaffected.\n\n"
+                "Still failing after it says *Running*? If you own the Space, "
+                f"a **Factory rebuild** in its Settings usually clears it.\n\n`{e}`"
+            )
             return False
     return True
 
@@ -1020,7 +1146,13 @@ def initialize_session_state():
         'groq_api_key': None,       # NEW: Groq API key
         'token_validated': False,
         'token_error': False,  # FIX B: Add explicit error flag
+        'token_error_detail': None,  # Actual reason, not a blanket "bad key"
         'kb_loaded': False,
+
+        # Model discovery (populated when the API key is validated)
+        'available_models': [],
+        'model_reasoning': None,
+        'model_fast': None,
 
         # NEW: Publication-grade settings
         'generation_mode': 'exploratory',  # 'exploratory' or 'publication'
@@ -1098,7 +1230,7 @@ def render_sidebar():
     with st.sidebar:
         st.markdown("### 🔧 Configuration")
 
-        with st.expander("🔑 Groq API Key", expanded=not st.session_state.token_validated):
+        with st.expander("🔑 API & Models", expanded=not st.session_state.token_validated):
             st.caption("Get your free API key at console.groq.com")
 
             key_input = st.text_input(
@@ -1110,33 +1242,93 @@ def render_sidebar():
 
             if st.button("Validate Key"):
                 try:
-                    # Test Groq connection
-                    client = OpenAI(
-                        api_key=key_input,
-                        base_url="https://api.groq.com/openai/v1"
-                    )
-                    # Simple test call to verify the key works
-                    client.models.list()
+                    # Validating the key and discovering models are the same
+                    # call, so keep the result instead of discarding it.
+                    models = fetch_available_models(key_input)
+
                     st.session_state.groq_api_key = key_input
+                    st.session_state.available_models = models
                     st.session_state.token_validated = True
                     st.session_state.token_error = False
+                    st.session_state.token_error_detail = None
+
+                    # Seed defaults from what is actually live right now.
+                    st.session_state.model_reasoning = pick_default(models, REASONING_PREFERENCE)
+                    st.session_state.model_fast = pick_default(models, FAST_PREFERENCE)
+                    get_available_models.clear()
                     st.rerun()
                 except Exception as e:
                     st.session_state.token_validated = False
                     st.session_state.token_error = True
+                    # FIXED: the real reason used to be discarded, so timeouts
+                    # and 404s were both reported as "Invalid API key".
+                    st.session_state.token_error_detail = explain_llm_error(e)
                     st.session_state.groq_api_key = None
+                    st.session_state.available_models = []
                     st.rerun()
-        
+
+            # Model pickers - populated from live discovery
+            available = st.session_state.get('available_models') or []
+            if available:
+                st.markdown("**🤖 Models**")
+                st.caption(f"{len(available)} chat models live on your account")
+
+                reasoning_default = active_model("reasoning")
+                st.selectbox(
+                    "Reasoning model",
+                    available,
+                    index=available.index(reasoning_default) if reasoning_default in available else 0,
+                    key="model_reasoning",
+                    help="Used for query decomposition (Layer 1) and verification."
+                )
+
+                fast_default = active_model("fast")
+                st.selectbox(
+                    "Fast model",
+                    available,
+                    index=available.index(fast_default) if fast_default in available else 0,
+                    key="model_fast",
+                    help="Used where latency matters more than depth."
+                )
+
+                if st.button("↻ Refresh model list"):
+                    get_available_models.clear()
+                    try:
+                        st.session_state.available_models = fetch_available_models(
+                            st.session_state.groq_api_key
+                        )
+                        st.success("Model list refreshed")
+                    except Exception as e:
+                        st.error(explain_llm_error(e))
+                    st.rerun()
+
         # FIX B: Proper state display with normalized flags
         if st.session_state.token_error and not st.session_state.token_validated:
-            st.error("❌ Invalid API key")
+            st.error(st.session_state.get('token_error_detail') or "❌ Invalid API key")
         elif st.session_state.token_validated and not st.session_state.token_error:
-            st.success("✅ Connected to Groq!")
+            n_models = len(st.session_state.get('available_models') or [])
+            st.success(f"✅ Connected to Groq ({n_models} models)")
         else:
             st.info("🔑 Enter API key and click Validate")
-        
+
+        # Backend pathway API status. Core generation does not need it, but
+        # DAM expansion, gene addition and the debate system do.
+        backend_up = backend_health()
+        if backend_up:
+            st.success("✅ Pathway API: online")
+        else:
+            st.warning(
+                "⚠️ **Pathway API: asleep or offline**\n\n"
+                + WAKE_BACKEND_HINT
+                + "\n\nCore signature generation works without it. DAM expansion, "
+                "gene addition and the debate system are paused until it is back."
+            )
+            if st.button("↻ Retry backend"):
+                backend_health.clear()
+                st.rerun()
+
         st.markdown("---")
-        
+
         # NEW: Mode indicator
         mode = st.session_state.get('generation_mode', 'exploratory')
         if mode == 'publication':
@@ -1691,7 +1883,7 @@ def render_layer2_semantic_fixed(query, target_count, min_genes, max_genes):
             # Initialize cache client
             status.info("🔌 Connecting to cache server...")
             cache_client = SearchCacheClient(
-                api_url="https://arunviswanathan91-msigdb-api.hf.space"
+                api_url=MSIGDB_API_URL
             )
 
             # Track cache statistics
@@ -1911,9 +2103,20 @@ def render_layer3_dam_remote():
             max_neighbors = st.slider("Max neighbors", 1, 10, 5, 1)
         
         # API URL
-        api_url = "https://arunviswanathan91-msigdb-api.hf.space"
-        
-        if st.button("🔬 Expand with DAM", type="primary", width="stretch"):
+        api_url = MSIGDB_API_URL
+
+        _backend_up = backend_health()
+        if not _backend_up:
+            st.warning(
+                "⚠️ **DAM expansion needs the pathway API, which is asleep "
+                "or offline.**\n\n"
+                + WAKE_BACKEND_HINT
+                + "\n\nYour signatures are unaffected - you can continue "
+                "without this step."
+            )
+
+        if st.button("🔬 Expand with DAM", type="primary", width="stretch",
+                     disabled=not _backend_up):
             
             timing = LayerTiming("Layer 3: DAM Expansion", time.time())
             
@@ -2100,12 +2303,20 @@ def render_layer4_standard_verification(query):
     
     if verification_mode != "None":
 
-        llm2_model = st.selectbox(
-            "Model:",
-            ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "gemma2-9b-it"],
-            key="llm2_model",
-            help="Select Groq model for verification"
-        )
+        # Live model list - see model_registry.py. Never a hardcoded list.
+        _available = st.session_state.get('available_models') or []
+        if _available:
+            _default = active_model("reasoning")
+            llm2_model = st.selectbox(
+                "Model:",
+                _available,
+                index=_available.index(_default) if _default in _available else 0,
+                key="llm2_model",
+                help="Groq model used for verification. List is fetched live from your account."
+            )
+        else:
+            llm2_model = None
+            st.info("Validate your Groq API key in the sidebar to load available models.")
         
         context_options = st.multiselect(
             "Context:",
@@ -2164,7 +2375,7 @@ def render_layer4_debate_verification(query):
                 padding: 1.2rem; border-radius: 12px; margin: 1rem 0; 
                 border-left: 4px solid #FF6B9D;'>
     <strong>✨ Database-Grounded Evidence + 3 Expert LLMs</strong><br><br>
-    Three LLMs (Qwen, Zephyr, Phi-3) debate signature quality with evidence from:<br>
+    Three LLMs (chosen live from your Groq account) debate signature quality with evidence from:<br>
     • Gene-Gene network (2.1M probabilities)<br>
     • Gene-Pathway network (2.1M probabilities)<br>
     • GTEx expression (47K genes)<br>
@@ -2522,7 +2733,17 @@ def render_layer4_debate_verification(query):
                     step=1
                 )
 
-            if st.button("🔍 Generate Addition Suggestions", type="primary", width="stretch", key="gen_additions"):
+            _backend_up = backend_health()
+            if not _backend_up:
+                st.warning(
+                    "⚠️ **Gene addition needs the pathway API, which is asleep "
+                    "or offline.**\n\n"
+                    + WAKE_BACKEND_HINT
+                    + "\n\nExisting signatures are unaffected."
+                )
+
+            if st.button("🔍 Generate Addition Suggestions", type="primary", width="stretch",
+                         key="gen_additions", disabled=not _backend_up):
 
                 suggestions_made = False
                 signatures = [st.session_state.signature_cache[sid] for sid in st.session_state.signature_ids]
@@ -2532,7 +2753,7 @@ def render_layer4_debate_verification(query):
                     st.session_state.gene_addition_suggestions = {}
 
                 try:
-                    db_api = DatabaseClient("https://arunviswanathan91-msigdb-api.hf.space")
+                    db_api = DatabaseClient(MSIGDB_API_URL)
 
                     progress_bar = st.progress(0)
                     status_text = st.empty()

@@ -10,6 +10,12 @@ import asyncio
 from openai import AsyncOpenAI
 import sys
 
+from model_registry import (
+    GROQ_BASE_URL,
+    resolve_debate_models,
+    is_chat_model,
+)
+
 
 async def diagnose_groq_models(api_key: str) -> dict:
     """
@@ -21,7 +27,7 @@ async def diagnose_groq_models(api_key: str) -> dict:
     Returns:
         dict with 'available_models', 'test_results', 'errors'
     """
-    base_url = "https://api.groq.com/openai/v1"
+    base_url = GROQ_BASE_URL
     client = AsyncOpenAI(api_key=api_key, base_url=base_url)
 
     result = {
@@ -48,11 +54,9 @@ async def diagnose_groq_models(api_key: str) -> dict:
         return result
 
     # Step 2: Test specific models used in debate system
-    debate_models = {
-        "skeptic": "llama-3.3-70b-versatile",
-        "discoverer": "llama-3.1-70b-versatile",
-        "mediator": "llama-3.2-90b-text-preview"
-    }
+    # Resolved from what is actually live, not a hardcoded list.
+    chat_models = [m for m in result['available_models'] if is_chat_model(m)]
+    debate_models = resolve_debate_models(chat_models)
 
     print("\n🧪 Testing debate system models...")
 
