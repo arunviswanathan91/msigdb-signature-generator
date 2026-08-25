@@ -1,0 +1,16 @@
+# Streamlit configuration
+# =======================
+
+[server]
+# Streamlit's module watcher walks sys.modules and touches every
+# transformers.models.*.image_processing_*_fast submodule. Each of those
+# lazily imports torchvision, which is not installed (and should not be -
+# this app does no image processing). The result was ~90 ModuleNotFoundError
+# tracebacks per rerun in the deploy log, burying real errors.
+#
+# Disabling the watcher is correct for Cloud, where source is never edited
+# in place. For local development set this to "auto" to get hot reload back.
+fileWatcherType = "none"
+
+[browser]
+gatherUsageStats = false
