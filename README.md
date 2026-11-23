@@ -2,13 +2,16 @@
 
 **▶️ Live app: [sig-gen.streamlit.app](https://sig-gen.streamlit.app)**
 
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
-[![Streamlit](https://img.shields.io/badge/streamlit-1.62-FF4B4B.svg)](https://streamlit.io/)
+[![Release](https://img.shields.io/github/v/release/arunviswanathan91/msigdb-signature-generator?label=release)](https://github.com/arunviswanathan91/msigdb-signature-generator/releases/latest)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24465961.svg)](https://doi.org/10.5281/zenodo.24465961)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/)
+[![Streamlit](https://img.shields.io/badge/streamlit-1.62-FF4B4B.svg)](https://streamlit.io/)
 
 Turn a plain-language biological question into a set of distinct gene signatures, each one traceable to the gene sets and statistics that produced it.
 
 > **The LLM proposes, the knowledge base decides.** A language model breaks the question into mechanisms and suggests seed genes. Which genes end up in a signature is decided by enrichment statistics over ~34,000 MSigDB gene sets, not by the model.
+
+**Version 3.0.0** changed how signatures are built and verified, so results from earlier versions should be regenerated. See [what changed](#version-history) and the [method and its validation](docs/METHODS.md).
 
 ---
 
@@ -33,7 +36,7 @@ Held-out recovery benchmark: hide a curated gene set (and its near-duplicates) f
 | 10, 50% wrong | 0.02 | 0.33 | 0.55 | **0.60** |
 | 5, all correct | 0.03 | 0.36 | 0.65 | **0.69** |
 
-Precision@20; random genes score 0.001. Reproduce with `python benchmarks/heldout_recovery.py`.
+Precision@20; random genes score 0.001. *v2 pipeline* is what the app did before version 3.0. Reproduce with `python benchmarks/heldout_recovery.py`.
 
 ### The debate
 
@@ -45,6 +48,8 @@ In the app, voted-out genes are deselected with the reason shown — never silen
 
 ## Quick start
 
+Python 3.12 or newer is required: the pinned NumPy and SciPy do not install on 3.11.
+
 ```bash
 git clone https://github.com/arunviswanathan91/msigdb-signature-generator.git
 cd msigdb-signature-generator
@@ -53,6 +58,8 @@ streamlit run app.py
 ```
 
 In the sidebar open **Providers & model**, pick a provider, paste its API key and click **Connect**. You can connect several at once.
+
+The first time signatures are built, the `all-MiniLM-L6-v2` embedding model (about 90 MB) is downloaded from Hugging Face.
 
 ### Without a browser
 
@@ -64,6 +71,8 @@ python run_pipeline.py "T cell exhaustion in the tumor microenvironment" \
     --mechanisms 8 --tissue "Blood/PBMC" --disease melanoma \
     --expand --debate --out results/exhaustion
 ```
+
+This writes `results/exhaustion.json` (the full record), `results/exhaustion.gmt` and `results/exhaustion.csv`.
 
 ```bash
 python run_pipeline.py --check     # which providers, models, debate roles and services are available
@@ -139,6 +148,24 @@ Free Hugging Face Spaces sleep when unused. Open [the Space page](https://huggin
 
 ---
 
+## Troubleshooting
+
+**`No matching distribution found for numpy==2.5.2` during install.** The Python version is older than 3.12.
+
+**The install is several GB.** On Linux the default `torch` wheel bundles the CUDA libraries. The comments in `requirements.txt` describe a CPU-only install.
+
+**A model is rejected, retired or out of quota.** If another model is connected, the call moves to it and the substitution is shown. Otherwise open **Providers & model**, click **Refresh model lists** and choose another model, or connect a second provider.
+
+**A provider shows no models.** Perplexity publishes no model list, and some self-hosted endpoints do not either. Type the model ID and click **Add model**.
+
+**`Pathway API: asleep or offline`.** See [Waking the pathway API](#waking-the-pathway-api). Layers 1, 2 and 5 do not need it.
+
+**Seed genes listed as "Not recognised, ignored" or "Ambiguous names, not used".** These names are not official symbols in the knowledge base and could not be mapped to exactly one gene. They are left out and the signature is built from the remaining seeds. If NCBI could not be reached the app says so, and running Layer 1 again retries the lookup.
+
+**Deploy log full of `No module named 'torchvision'`.** Streamlit's file watcher triggers these and they are harmless. `.streamlit/config.toml` turns the watcher off; set `fileWatcherType = "auto"` locally if you want hot reload.
+
+---
+
 ## Repository
 
 | File | Role |
@@ -162,7 +189,7 @@ Free Hugging Face Spaces sleep when unused. Open [the Space page](https://huggin
 
 ```bash
 pip install -r requirements-dev.txt
-pytest                                           # ~30 s, no network
+pytest                                           # 180 tests, no network, 1-2 minutes
 python scripts/build_embeddings.py --verify      # the committed embeddings match the knowledge base
 ```
 
@@ -170,9 +197,11 @@ python scripts/build_embeddings.py --verify      # the committed embeddings matc
 
 ## Reproducibility
 
-Every JSON export records: the query and context; the knowledge-base version and SHA-256 of both data files; every retrieval parameter; the mechanisms, seed genes and alias mappings; for each signature the supporting gene sets with p-values and each gene's score, support and origin; the provider and model that actually answered each call, with the sampling controls that were really applied; every debate vote with its reason; every gene left out, with why; and package versions.
+Every JSON export records: the query and context; the pipeline, engine and debate versions; the knowledge-base version and SHA-256 of both data files; every retrieval parameter; the mechanisms, seed genes and alias mappings; for each signature the supporting gene sets with p-values and each gene's score, support and origin; the provider and model that actually answered each call, with the sampling controls that were really applied; every debate vote with its reason; every gene left out, with why; and package versions.
 
 Retrieval and scoring are bit-for-bit deterministic. LLM steps use temperature 0 and a fixed seed where the provider accepts them. Some models do not (current Claude models and OpenAI reasoning models fix their own sampling); the export shows `temperature: null` for those calls, and their output can differ between runs.
+
+To run exactly the archived code, check out the release tag: `git checkout 3.0.0`.
 
 ---
 
@@ -188,17 +217,43 @@ Retrieval and scoring are bit-for-bit deterministic. LLM steps use temperature 0
 
 ---
 
+## Version history
+
+| Version | Released | |
+|---|---|---|
+| **3.0.0** | 23 November 2026 | [release](https://github.com/arunviswanathan91/msigdb-signature-generator/releases/tag/3.0.0) · DOI [10.5281/zenodo.24465961](https://doi.org/10.5281/zenodo.24465961) |
+| 1.0.0 | 2 April 2026 | [release](https://github.com/arunviswanathan91/msigdb-signature-generator/releases/tag/zenodo-doi-interim) |
+
+What changed in 3.0:
+
+- **How signatures are built.** Earlier versions embedded the list of seed gene symbols as text, took the 50 nearest gene sets and ranked genes by summed similarity. On the held-out benchmark that recovers almost none of the hidden genes (precision@20 of 0.04, against 0.70 now). Version 3.0 retrieves gene sets by statistical enrichment for the seeds, re-ranks them by semantic similarity to the mechanism's description, and scores each gene by its support across them.
+- **How signatures are checked.** The debate is a per-gene vote with a fixed, documented decision rule and reported agreement statistics. Genes voted out are deselected with the reason, not deleted.
+- **Any LLM provider.** Seventeen providers instead of Groq only. Calls recover from rejected parameters, truncated answers, rate limits and retired models, and every substitution is recorded.
+- **Gene names.** Seed genes given as aliases are mapped to official symbols through NCBI Gene.
+- **Reproducibility.** A command-line runner, a provenance record in every export, 180 offline tests and the held-out benchmark.
+- **Removed.** The shared result cache, a 41 MB index that no code used, and the legacy modules.
+
+Signatures exported before 3.0 came from the earlier procedure. Regenerate them rather than combining them with 3.0 output.
+
+---
+
 ## Citation
+
+Cite the archived release you used. For version 3.0.0:
 
 ```bibtex
 @software{msigdb_signature_generator,
-  author  = {Viswanathan, Arun Geetha},
-  title   = {MSigDB Signature Generator},
-  year    = {2026},
-  doi     = {10.5281/zenodo.19386462},
-  url     = {https://github.com/arunviswanathan91/msigdb-signature-generator}
+  author    = {Viswanathan, Arun Geetha},
+  title     = {MSigDB Signature Generator},
+  version   = {3.0.0},
+  year      = {2026},
+  publisher = {Zenodo},
+  doi       = {10.5281/zenodo.24465961},
+  url       = {https://github.com/arunviswanathan91/msigdb-signature-generator}
 }
 ```
+
+Please also cite MSigDB, whose gene sets the knowledge base is built from.
 
 ## Acknowledgments
 
