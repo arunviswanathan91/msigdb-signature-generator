@@ -83,11 +83,6 @@ What did not hold up: size normalisation was chosen on the development split (+0
 
 Each export contains the data identity (knowledge-base version and SHA-256 of both files), all parameters, mechanisms with seeds and alias mappings, per-signature supporting sets with statistics, per-gene score, support and origin, the provider and model that answered each LLM call with the sampling controls actually applied, complete debate records, every gene left out with the reason, and package versions. Sections 1 (after the LLM call) and 2 reproduce exactly from an export. LLM calls use temperature 0 and a fixed seed where accepted; models that fix their own sampling are recorded as such and may differ between runs.
 
-## 6. To document before publication
-
-- How `gene_gene.db`, `gene_pathway.db`, `pathway_pathway.db` and the gene evidence table in the Hugging Face dataset were constructed. This repository contains no build code for them.
-- The licence status of redistributed gene sets (KEGG and BioCarta subsets of MSigDB carry separate terms).
-- An external validation of the signatures and of the debate's decisions.
 
 ## References
 
