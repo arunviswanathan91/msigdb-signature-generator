@@ -39,11 +39,15 @@ ENV/
 
 
 # Results & Outputs (Generated files)
-results/
-outputs/
-*.gmt
-*.json
+# Only generated output is ignored. The previous blanket *.json / *.gmt rules
+# silently untracked any JSON config or example added to the repo.
+/results/
+/outputs/
+signatures*.gmt
+signatures*.csv
+signatures*.json
 temp/
+.pytest_cache/
 
 # Logs
 *.log
