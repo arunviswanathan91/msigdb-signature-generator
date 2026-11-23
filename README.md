@@ -210,10 +210,9 @@ To run exactly the archived code, check out the release tag: `git checkout 3.0.0
 - **The benchmark measures recovery of curated gene-set members**, with seeds drawn from the hidden set. It shows the retrieval finds related genes and tolerates wrong seeds. It does not show that a signature is biologically correct for a new question; that needs external validation on expression data.
 - **Semantic search is the weak channel.** Gene-set embeddings encode the set name plus its first ten genes; on its own it scores half of what enrichment does. It earns its place by re-ranking and by backing up noisy seeds.
 - **Debate outcomes depend on the models.** Three models from one provider share blind spots. The membership rule the agents apply is strict by design; a signature that is heavily pruned is flagged, not hidden.
-- **Database evidence is partial.** The evidence table covers 10,000 genes, the network stores each gene's 50 strongest links, and GTEx is bulk tissue, which can miss genes restricted to rare cell types. How `gene_gene.db` and the evidence table were built is not documented in this repository and must be described in any paper.
+- **Database evidence is partial.** The evidence table covers 10,000 genes, the network stores each gene's 50 strongest links, and GTEx is bulk tissue, which can miss genes restricted to rare cell types. How `gene_gene.db` and the evidence table were built is not documented in this repository.
 - **Free-tier limits.** A 35-signature debate needs roughly 150k tokens per model, close to a free daily allowance. The client waits and substitutes models, but large runs are slow on free keys.
-- **Licensing of the data.** `data/knowledge_base.json.gz` and the Hugging Face dataset redistribute MSigDB content, including KEGG and BioCarta gene sets that carry their own terms. Check the [MSigDB licence](https://www.gsea-msigdb.org/gsea/msigdb_license_terms.jsp) before publishing, and give the dataset a data card. No `LICENSE` file is present for the code yet.
-- **The Space still exposes unauthenticated cache endpoints** (`/api/cache/*`). The app no longer uses them; they should be removed from the Space.
+- **Data licensing.** `data/knowledge_base.json.gz` and the Hugging Face dataset contain MSigDB gene sets, including KEGG and BioCarta sets that carry their own terms. The [MSigDB licence](https://www.gsea-msigdb.org/gsea/msigdb_license_terms.jsp) applies to them. The code has no `LICENSE` file yet.
 
 ---
 
