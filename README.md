@@ -4,7 +4,7 @@
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
 [![Streamlit](https://img.shields.io/badge/streamlit-1.62-FF4B4B.svg)](https://streamlit.io/)
-[![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.19386462-blue.svg)](https://doi.org/10.5281/zenodo.19386462)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24465961.svg)](https://doi.org/10.5281/zenodo.24465961)
 
 Turn a plain-language biological question into a set of distinct gene signatures, each one traceable to the gene sets and statistics that produced it.
 
