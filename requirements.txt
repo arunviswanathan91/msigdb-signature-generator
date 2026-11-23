@@ -27,11 +27,15 @@ scikit-learn==1.9.0
 # (verify that wheel exists for your Python version before switching)
 torch==2.13.0
 
-# LLM (Groq via the OpenAI-compatible SDK - see model_registry.py)
+# LLM providers (see providers.py, llm_client.py)
+#   openai     - every OpenAI-compatible provider: OpenAI, Groq, Gemini, Mistral,
+#                DeepSeek, xAI, OpenRouter, Together, Fireworks, Cerebras, ...
+#   anthropic  - Claude, through Anthropic's own SDK
 openai==3.3.1
+anthropic==2.12.0
 huggingface-hub==1.28.0
 
-# Data Processing
+# Statistics: hypergeometric enrichment and gene-set clustering (signature_engine.py)
 scipy==1.18.1
 
 # Utilities
@@ -39,12 +43,8 @@ python-dateutil==2.9.0.post0
 packaging==26.3
 tqdm==4.70.0
 requests==2.34.2
-nest_asyncio==1.6.0
 
-# Visualisation (imported at module scope in app.py - not optional)
-plotly==6.9.0
-
-# REMOVED: faiss-cpu
-# Declared since v3.0 but never imported anywhere in the repo. Pathway
-# similarity is a numpy cosine loop (app.py, cache_client.py), not FAISS.
-# Dropping it removes a large wheel from every install.
+# REMOVED in 3.0
+#   faiss-cpu     never imported; similarity is one NumPy matrix product.
+#   nest_asyncio  the debate now runs in its own event loop (asyncio.run).
+#   plotly        charts were in an unreachable code path; results are tables.

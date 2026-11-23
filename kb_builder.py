@@ -10,7 +10,6 @@ import os
 from datetime import datetime
 from collections import defaultdict
 from typing import Dict, List, Tuple, Any
-import tempfile
 
 
 class KBBuilder:
@@ -203,3 +202,49 @@ def validate_gmt_content(content: str) -> Tuple[bool, str]:
         return False, "File does not appear to be in GMT format (tab-separated: pathway_name, description, genes...)"
     
     return True, ""
+
+
+def main() -> int:
+    """
+    Command-line build, so the knowledge base in data/ can be regenerated:
+
+        python kb_builder.py msigdb.v2025.1.Hs.symbols.gmt ImmPort.gmt \\
+            --out data/knowledge_base.json.gz
+
+    After rebuilding, regenerate the embeddings to match:
+
+        python scripts/build_embeddings.py --out data/pathway_embeddings.pkl
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Build the gene-set knowledge base from GMT files.")
+    parser.add_argument("gmt_files", nargs="+", help="GMT files; later files win on duplicate names")
+    parser.add_argument("--out", default="data/knowledge_base.json.gz")
+    parser.add_argument("--min-genes", type=int, default=5)
+    parser.add_argument("--max-genes", type=int, default=500)
+    args = parser.parse_args()
+
+    uploads = []
+    for path in args.gmt_files:
+        with open(path, "r", encoding="utf-8") as handle:
+            content = handle.read()
+        valid, error = validate_gmt_content(content)
+        if not valid:
+            print(f"{path}: {error}")
+            return 1
+        uploads.append((os.path.basename(path), content))
+
+    builder = KBBuilder(min_genes=args.min_genes, max_genes=args.max_genes)
+    kb = builder.build_kb(uploads)
+    size = builder.save_kb(kb, args.out)
+    meta = kb["metadata"]
+    print(f"wrote {args.out}: {meta['total_pathways']:,} gene sets, "
+          f"{meta['total_unique_genes']:,} genes, {size / 1e6:.1f} MB")
+    for source, stats in meta["stats"].items():
+        print(f"  {source}: kept {stats['kept']:,} of {stats['total']:,} "
+              f"(too small {stats['too_small']:,}, too large {stats['too_large']:,})")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

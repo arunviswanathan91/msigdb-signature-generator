@@ -6,65 +6,44 @@
 [![Streamlit](https://img.shields.io/badge/streamlit-1.62-FF4B4B.svg)](https://streamlit.io/)
 [![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.19386462-blue.svg)](https://doi.org/10.5281/zenodo.19386462)
 
-Turn a plain-language biological question into a set of granular, non-overlapping gene signatures grounded in MSigDB pathways.
+Turn a plain-language biological question into a set of distinct gene signatures, each one traceable to the gene sets and statistics that produced it.
 
-Ask *"T cell exhaustion in the tumor microenvironment"* and get back N distinct mechanisms, each backed by pathway evidence and refined by LLM verification — or by a multi-model adversarial debate.
+> **The LLM proposes, the knowledge base decides.** A language model breaks the question into mechanisms and suggests seed genes. Which genes end up in a signature is decided by enrichment statistics over ~34,000 MSigDB gene sets, not by the model.
 
 ---
 
-## 🎯 What it does
-
-The pipeline runs in five layers. Each is inspectable and re-runnable from the UI.
+## What it does
 
 | Layer | What happens | Needs |
 |---|---|---|
-| **1. Granularity & Selection** | An LLM decomposes your query into exactly N non-overlapping molecular mechanisms. You pick which to keep. | Groq API |
-| **2. Pathway Search** | Each mechanism is embedded and matched against ~19,000 MSigDB pathways by cosine similarity. Runs **locally**. | — |
-| **3. DAM Expansion** | Expands signatures using gene-neighbour statistics from the pathway API. | Pathway API |
-| **4. Verification** | Batch LLM review of each signature — flag genes to drop, suggest genes to add. Or run the **multi-LLM debate** instead. | Groq API |
-| **5. Gene Addition & Export** | Confidence-scored additions, then export as GMT / CSV / JSON. | Pathway API (additions only) |
+| **1. Mechanisms** | An LLM decomposes the question into N distinct mechanisms, each with a plain-language description and seed genes. Aliases (GLUT1, PD-L1, 4-1BB) are mapped to official symbols through NCBI Gene. | any LLM provider; NCBI (optional) |
+| **2. Signatures** | Gene sets enriched for the seeds (hypergeometric, BH-FDR) are retrieved, re-ranked by semantic similarity to the description, and genes are scored by weighted support across them. Deterministic, runs locally. | — |
+| **3. Network expansion** | Optionally adds genes that are network neighbours of at least two signature genes. | pathway API |
+| **4. Verification** | Either one model reviews each signature, or three models with opposed burdens of proof **debate every gene** using per-gene database evidence. | any LLM provider; pathway API (optional) |
+| **5. Approve & export** | You have the last word on every gene. Export GMT, CSV and a JSON record with full provenance. | — |
 
-### The debate system
+### Does the retrieval work?
 
-Instead of a single verification pass, three **different** models argue about each signature:
+Held-out recovery benchmark: hide a curated gene set (and its near-duplicates) from the knowledge base, give the method its name plus a few member genes, and score the top 20 other genes it returns against the hidden members. Test split, 250 gene sets never used for tuning ([protocol and full table](docs/METHODS.md#4-validation)):
 
-- **🔬 Skeptic** — distrusts LLM intuition, demands database evidence, hunts false positives
-- **💡 Discoverer** — argues for plausible novel connections not yet in databases
-- **⚖️ Mediator** — weighs both and breaks ties
+| Seeds given | v2 pipeline | semantic only | enrichment only | **this method** |
+|---|---|---|---|---|
+| 10, all correct | 0.04 | 0.35 | 0.68 | **0.70** |
+| 10, 30% wrong | 0.03 | 0.34 | 0.61 | **0.64** |
+| 10, 50% wrong | 0.02 | 0.33 | 0.55 | **0.60** |
+| 5, all correct | 0.03 | 0.36 | 0.65 | **0.69** |
 
-A database injector feeds real evidence between rounds, and the final call is a confidence-weighted vote with convergence and entropy tracking. The three models are chosen live from your Groq account and are deliberately from **different model families** so the disagreement is genuine.
+Precision@20; random genes score 0.001. Reproduce with `python benchmarks/heldout_recovery.py`.
 
----
+### The debate
 
-## 🏗️ Architecture
+Three models vote keep/remove **on every gene**, each with a different burden of proof (skeptic, advocate, mediator). They see the research question, the mechanism, the genes, and a database evidence table (links to the rest of the signature, GTEx expression, knowledge-base coverage). Only contested genes are re-argued. A gene is voted out when the confidence-weighted pooled probability of removal is at least 0.6 *and* a majority voted to remove it. Every signature gets per-gene entropy and conflict, a stability score, agreement, Fleiss' κ, and a count of how often the consensus followed or overrode the database.
 
-```text
-                    ┌──────────────────────────┐
-   your browser ───▶│  Streamlit app (app.py)  │
-                    └────┬────────────────┬────┘
-                         │                │
-              chat/LLM   │                │  pathway lookups
-                         ▼                ▼
-              ┌──────────────────┐  ┌──────────────────────────┐
-              │   Groq API       │  │  HF Space: msigdb-api    │
-              │ (OpenAI-compat)  │  │  (REST backend)          │
-              └──────────────────┘  └────────────┬─────────────┘
-                                                 │ loads
-                                                 ▼
-                                    ┌──────────────────────────┐
-                                    │ HF Dataset:              │
-                                    │ msigdb-databases (~1.4GB)│
-                                    └──────────────────────────┘
-
-   Local, no network: data/pathway_embeddings.pkl  (Layer 2 search)
-                      data/knowledge_base.json.gz  (19k pathways)
-```
-
-**The app never talks to the HF dataset directly** — only the Space does. If the Space is offline, Layers 1, 2 and 4 still work; Layers 3 and 5 and the debate system pause.
+In the app, voted-out genes are deselected with the reason shown — never silently deleted — so you can overrule them.
 
 ---
 
-## 🚀 Quick Start
+## Quick start
 
 ```bash
 git clone https://github.com/arunviswanathan91/msigdb-signature-generator.git
@@ -73,138 +52,143 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Then in the sidebar:
+In the sidebar open **Providers & model**, pick a provider, paste its API key and click **Connect**. You can connect several at once.
 
-1. Open **🔑 API & Models**
-2. Paste a **Groq API key** — free at [console.groq.com/keys](https://console.groq.com/keys)
-3. Click **Validate Key**
+### Without a browser
 
-Validation and model discovery are the same call, so on success the sidebar immediately shows how many models your account can use and lets you pick which to run.
+The command-line runner executes the same code as the app, so a result can be regenerated from one line:
 
-> **Note:** this app uses a **Groq** key, not a Hugging Face token. Earlier versions used HF inference; that migration is complete.
-
----
-
-## 🤖 Model configuration
-
-**No Groq model ID is hardcoded anywhere in the application code.** This is deliberate.
-
-Groq retires models on a rolling schedule, and every ID this project ever pinned has since been decommissioned:
-
-| Model | Retired |
-|---|---|
-| `llama-3.3-70b-versatile` | 2026-08-16 |
-| `llama-3.1-8b-instant` | 2026-08-16 |
-| `gemma2-9b-it` | 2025-10-08 |
-| `llama-3.1-70b-versatile` | 2025-01-24 |
-| `llama-3.2-90b-text-preview` | 2024-11-25 |
-
-Hand-maintaining that list failed repeatedly — one "fix" swapped in two IDs that had already been dead for over a year, and the app 404'd on the next deploy.
-
-So [`model_registry.py`](model_registry.py) never asserts which models exist. It **asks** Groq at runtime via `/models`, filters to chat-capable models, and picks the best available option from an ordered *preference* list. A retired ID in that list is harmless — it is simply skipped. If every preference is gone, the app falls back to whatever the API actually reports and keeps working.
-
-**In the UI:** the sidebar exposes a **Reasoning model** and a **Fast model** picker, plus **↻ Refresh model list**. Layer 4 has its own per-run model dropdown.
-
-**Programmatically:**
-
-```python
-from model_registry import fetch_available_models, pick_default, REASONING_PREFERENCE
-
-models = fetch_available_models(api_key)          # live list
-model  = pick_default(models, REASONING_PREFERENCE)
+```bash
+export GROQ_API_KEY=...        # and/or OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, DEEPSEEK_API_KEY, ...
+python run_pipeline.py "T cell exhaustion in the tumor microenvironment" \
+    --mechanisms 8 --tissue "Blood/PBMC" --disease melanoma \
+    --expand --debate --out results/exhaustion
 ```
 
-To change which models are *preferred*, edit the preference lists in `model_registry.py`. You never need to edit them just because a model was retired.
-
-**If a model dies mid-run**, the app retries once on the next live model and tells you it did, rather than failing the layer.
+```bash
+python run_pipeline.py --check     # which providers, models, debate roles and services are available
+```
 
 ---
 
-## 📁 Repository structure
+## LLM providers
 
-| File | Lines | Role |
+Any of these work, alone or together. Models are discovered from each provider at run time; nothing is hardcoded.
+
+| Provider | Environment variable | Notes |
 |---|---|---|
-| `app.py` | 3074 | Main Streamlit app — all five layers, sidebar, session state, exports |
-| `debate_system_with_injector.py` | 1207 | Multi-round adversarial debate engine, weighted voting, convergence metrics |
-| `model_registry.py` | 260 | **Model discovery and selection. Single source of truth for model IDs.** |
-| `db_client.py` | 206 | REST client for the pathway API Space |
-| `db_client_enhanced.py` | 553 | Builds debate evidence context from the same endpoints |
-| `cache_client.py` | 218 | Semantic search cache (optional; degrades silently) |
-| `kb_builder.py` | 205 | Builds a custom knowledge base from GMT uploads |
-| `groq_model_diagnostic.py` | 230 | CLI: list live models, test debate roles |
-| `test_debate_fixes.py` | 169 | CLI test of debate config and context growth |
-| `test_cache_integration.py` | 120 | CLI test of the search cache |
-| `complete_module_replacements.py` | 1111 | ⚠️ Legacy. Only `HOUSEKEEPING_GENES` is still used. |
-| `material_ui_builtin.py` / `material_ui_css.py` / `material_design_theme.py` | 1168 | ⚠️ Theme modules, currently unreferenced by `app.py` |
+| Groq | `GROQ_API_KEY` | free tier, with tight per-minute and per-day token limits |
+| OpenAI | `OPENAI_API_KEY` | |
+| Anthropic (Claude) | `ANTHROPIC_API_KEY` | through the official `anthropic` SDK |
+| Google Gemini | `GEMINI_API_KEY` | |
+| Mistral AI | `MISTRAL_API_KEY` | |
+| DeepSeek | `DEEPSEEK_API_KEY` | |
+| xAI (Grok) | `XAI_API_KEY` | |
+| OpenRouter | `OPENROUTER_API_KEY` | one key for many vendors |
+| Together AI | `TOGETHER_API_KEY` | |
+| Fireworks AI | `FIREWORKS_API_KEY` | |
+| Cerebras | `CEREBRAS_API_KEY` | |
+| Cohere | `COHERE_API_KEY` | |
+| Perplexity (Sonar) | `PERPLEXITY_API_KEY` | no model list; type the model ID |
+| Hugging Face Inference Providers | `HF_TOKEN` | |
+| NVIDIA NIM | `NVIDIA_API_KEY` | |
+| Ollama (local) | — | only when the app runs on the same machine |
+| Custom | — | any OpenAI-compatible endpoint: Azure OpenAI v1, LM Studio, vLLM, LiteLLM |
 
-### Data
+A model is written `provider:model`, for example `anthropic:claude-opus-5-5` or `groq:openai/gpt-oss-120b`.
 
-| File | Size | Used by |
-|---|---|---|
-| `data/pathway_embeddings.pkl` | 52 MB | Layer 2 search. **Required** — the app hard-fails without it. |
-| `data/knowledge_base.json.gz` | 8.8 MB | Built-in KB, ~19,000 pathways |
-| `data/dam_index_light.pkl` | 39 MB | ⚠️ Committed but referenced by nothing. See Known gaps. |
+**Why connect more than one?** The debate is only as independent as its three models. With keys for different vendors, the three roles are automatically drawn from different model families. With a single provider the app tells you how many distinct families it could find.
 
-### Config
+**What the client handles for you.** A parameter a model rejects is dropped and the call retried; truncated answers are retried with a larger budget and never parsed; per-minute limits are waited out; a model that is retired, out of quota or declines the request hands over to another connected model. Every substitution is shown and exported.
 
-- `.streamlit/config.toml` — disables the module watcher (see Troubleshooting)
-- `requirements.txt` — fully pinned; see the file header for why
+**Only Groq has been exercised against the live service.** The other providers are implemented from their documentation and covered by tests with faked transports. Model IDs are whatever each provider's own model list returns.
 
----
-
-## 🌐 Backend services
-
-| Service | Status | Impact if down |
-|---|---|---|
-| [Groq API](https://console.groq.com) | required | Layers 1 and 4 stop |
-| [HF Space `msigdb-api`](https://huggingface.co/spaces/arunviswanathan91/msigdb-api) | optional-ish | Layers 3 and 5 and the debate pause; core generation is fine |
-| [HF Dataset `msigdb-databases`](https://huggingface.co/datasets/arunviswanathan91/msigdb-databases) | indirect | Consumed by the Space, never by the app |
-
-The sidebar shows a live **Pathway API** badge. When it is offline, the features that need it are disabled with an explanation instead of throwing, and a **↻ Retry backend** button re-probes.
-
-### ☕ Waking the pathway API
-
-Free Hugging Face Spaces **sleep after a period of inactivity**. This is normal and expected — nothing is broken.
-
-**To wake it: open [the Space page](https://huggingface.co/spaces/arunviswanathan91/msigdb-api) and leave it open for ~30–60 seconds** until the status reads *Running*. Then return to the app and click **↻ Retry backend**.
-
-Every offline message in the app links straight there, so users can do this themselves without knowing any of the above.
-
-**If the Space shows a Runtime Error** instead of *Sleeping* (for example `Could not resolve host: huggingface.co` during container init — an HF infrastructure hiccup, not a code fault), the owner needs to open the Space → **Settings** → **Factory rebuild**.
+Keys entered in the app stay in the browser session and are never written to exports. A key set as an environment variable (or Streamlit secret) connects that provider automatically for every visitor of that deployment.
 
 ---
 
-## 🐛 Troubleshooting
+## Architecture
 
-**`Model unavailable` / 404 `model_not_found`**
-Groq retired that model. Sidebar → **🔑 API & Models** → **↻ Refresh model list**, then pick another. The app also auto-retries once on its own.
+```text
+                    ┌──────────────────────────┐
+   your browser ───▶│  Streamlit app (app.py)  │     run_pipeline.py (same code, no UI)
+                    └───┬──────────┬─────────┬─┘
+                        │          │         │
+            LLM calls   │          │         │  gene aliases
+                        ▼          │         ▼
+          ┌────────────────────┐   │   ┌──────────────────┐
+          │ any LLM provider   │   │   │ NCBI Gene        │
+          │ (llm_client.py)    │   │   │ (E-utilities)    │
+          └────────────────────┘   │   └──────────────────┘
+                                   │  network + evidence
+                                   ▼
+                        ┌──────────────────────────┐      ┌──────────────────────────┐
+                        │ HF Space: msigdb-api     │─────▶│ HF Dataset:              │
+                        │ (REST)                   │ loads│ msigdb-databases (~1.4GB)│
+                        └──────────────────────────┘      └──────────────────────────┘
 
-**`Invalid API key`**
-Check the key at [console.groq.com/keys](https://console.groq.com/keys). Note the sidebar now reports the *actual* failure — a timeout says timeout, not "bad key".
+   Local, no network:  data/knowledge_base.json.gz   34,021 gene sets, 42,302 genes
+                       data/pathway_embeddings.pkl   one embedding per gene set
+```
 
-**`Pathway API: offline`**
-The Space is down. Core generation still works. Factory-rebuild the Space to restore Layers 3/5 and the debate.
+If the Space is asleep, Layers 1, 2 and 5 still work, Layer 3 is disabled, and the debate runs without database evidence and says so in the export. If NCBI is unreachable, aliases are simply not resolved.
 
-**Deploy log flooded with `ModuleNotFoundError: No module named 'torchvision'`**
-Streamlit's module watcher walks `sys.modules` and touches `transformers.models.*.image_processing_*_fast`, each of which lazily imports `torchvision`. Harmless, but it buried real errors. Fixed by `fileWatcherType = "none"` in `.streamlit/config.toml`. For local hot-reload, set it back to `"auto"`.
+### Waking the pathway API
 
-**Knowledge base not found**
-`data/knowledge_base.json.gz` must be present. The app checks `data/`, `./data/` and `../data/`.
+Free Hugging Face Spaces sleep when unused. Open [the Space page](https://huggingface.co/spaces/arunviswanathan91/msigdb-api), leave it open for 30–60 seconds until it reads *Running*, then click **Retry backend** in the app. If it shows a runtime error instead, the owner needs **Settings → Factory rebuild**.
 
 ---
 
-## ⚠️ Known gaps
+## Repository
 
-- `data/dam_index_light.pkl` (39 MB) is committed but referenced by no code. It looks intended as a local fallback for the gene-neighbour lookups that currently require the Space — wiring it up would remove that dependency entirely.
-- `complete_module_replacements.py` is 1111 lines of legacy code kept alive for a single constant.
-- The `material_ui_*` theme modules are unreferenced by `app.py`.
-- `.gitignore` ignores `*.json` globally, so new JSON config will be silently untracked.
-- ~91 MB of pickles are committed as raw git blobs (no LFS).
-- No `LICENSE` file is present despite the MIT intent.
+| File | Role |
+|---|---|
+| `app.py` | Streamlit UI only |
+| `run_pipeline.py` | headless runner and `--check` diagnostics |
+| `signature_engine.py` | retrieval, scoring, sub-modules (pure NumPy/SciPy, deterministic) |
+| `pipeline.py` | steps shared by app and runner: decomposition, alias resolution, review, applying outcomes |
+| `debate_engine.py` | structured per-gene debate and its statistics |
+| `llm_client.py` | JSON chat calls with recovery; OpenAI-compatible and Anthropic backends |
+| `providers.py` | the provider table |
+| `model_registry.py` | model references, ranking, debate role assignment |
+| `db_client.py` | pathway API: network expansion, per-gene evidence |
+| `ncbi_client.py` | NCBI Gene alias lookup |
+| `exporters.py` | GMT, CSV, provenanced JSON |
+| `gene_filters.py` | housekeeping-gene filter |
+| `kb_builder.py`, `scripts/build_embeddings.py` | rebuild the knowledge base and its embeddings |
+| `benchmarks/heldout_recovery.py` | the validation benchmark; results in `benchmarks/results/` |
+| `tests/` | 180 offline tests, including the app driven end to end |
+| `docs/METHODS.md` | the method, formulas, validation and limitations |
+
+```bash
+pip install -r requirements-dev.txt
+pytest                                           # ~30 s, no network
+python scripts/build_embeddings.py --verify      # the committed embeddings match the knowledge base
+```
 
 ---
 
-## 📚 Citation
+## Reproducibility
+
+Every JSON export records: the query and context; the knowledge-base version and SHA-256 of both data files; every retrieval parameter; the mechanisms, seed genes and alias mappings; for each signature the supporting gene sets with p-values and each gene's score, support and origin; the provider and model that actually answered each call, with the sampling controls that were really applied; every debate vote with its reason; every gene left out, with why; and package versions.
+
+Retrieval and scoring are bit-for-bit deterministic. LLM steps use temperature 0 and a fixed seed where the provider accepts them. Some models do not (current Claude models and OpenAI reasoning models fix their own sampling); the export shows `temperature: null` for those calls, and their output can differ between runs.
+
+---
+
+## Limitations
+
+- **The benchmark measures recovery of curated gene-set members**, with seeds drawn from the hidden set. It shows the retrieval finds related genes and tolerates wrong seeds. It does not show that a signature is biologically correct for a new question; that needs external validation on expression data.
+- **Semantic search is the weak channel.** Gene-set embeddings encode the set name plus its first ten genes; on its own it scores half of what enrichment does. It earns its place by re-ranking and by backing up noisy seeds.
+- **Debate outcomes depend on the models.** Three models from one provider share blind spots. The membership rule the agents apply is strict by design; a signature that is heavily pruned is flagged, not hidden.
+- **Database evidence is partial.** The evidence table covers 10,000 genes, the network stores each gene's 50 strongest links, and GTEx is bulk tissue, which can miss genes restricted to rare cell types. How `gene_gene.db` and the evidence table were built is not documented in this repository and must be described in any paper.
+- **Free-tier limits.** A 35-signature debate needs roughly 150k tokens per model, close to a free daily allowance. The client waits and substitutes models, but large runs are slow on free keys.
+- **Licensing of the data.** `data/knowledge_base.json.gz` and the Hugging Face dataset redistribute MSigDB content, including KEGG and BioCarta gene sets that carry their own terms. Check the [MSigDB licence](https://www.gsea-msigdb.org/gsea/msigdb_license_terms.jsp) before publishing, and give the dataset a data card. No `LICENSE` file is present for the code yet.
+- **The Space still exposes unauthenticated cache endpoints** (`/api/cache/*`). The app no longer uses them; they should be removed from the Space.
+
+---
+
+## Citation
 
 ```bibtex
 @software{msigdb_signature_generator,
@@ -216,9 +200,10 @@ Streamlit's module watcher walks `sys.modules` and touches `transformers.models.
 }
 ```
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
-- **MSigDB** (Broad Institute) — pathway gene sets
-- **Groq** — LLM inference
+- **MSigDB** (Broad Institute) and **ImmPort** — gene sets
+- **NCBI Gene** — gene nomenclature; the idea of grounding gene names in NCBI's APIs follows **GeneGPT** (Jin *et al.*, *Bioinformatics* 2024)
+- **GTEx** — tissue expression
 - **sentence-transformers** — `all-MiniLM-L6-v2` embeddings
 - **Streamlit** — application framework

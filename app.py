@@ -1,95 +1,91 @@
 """
-Biological Signature Generator - PUBLICATION-GRADE VERSION WITH DEBATE SYSTEM
-=============================================================================
+MSigDB Signature Generator - Streamlit app
+==========================================
 
-FIXES APPLIED:
-✅ Fix A: DAM loader diagnostics
-✅ Fix B: Token UI race condition  
-✅ Fix C: Signature deduplication
-✅ Fix D: Signature ID mapping in verification
-✅ Fix E: LLM logging
-✅ Root Cause #1: Use ALL mechanism queries (removed [:1])
-✅ Root Cause #2: Dynamic variant allocation
-✅ DAM: Remote API integration
-✅ UI: Text-based gene selection
+UI only. The method lives in importable, tested modules:
 
-PUBLICATION-GRADE ENHANCEMENTS:
-✅ Mode toggle (Exploratory vs Publication)
-✅ Biological context collection
-✅ Housekeeping gene filter
-✅ Context-aware verification
-✅ Mode + context in exports
+    signature_engine.py   seed-anchored hybrid retrieval + evidence-weighted scoring
+    pipeline.py           LLM decomposition (Layer 1), alias resolution, review (Layer 4)
+    debate_engine.py      structured three-agent, per-gene debate (Layer 4)
+    db_client.py          pathway API: network expansion (Layer 3), evidence tables
+    ncbi_client.py        NCBI Gene: gene aliases -> official symbols
+    llm_client.py         robust JSON chat calls for every provider
+    providers.py          the provider registry
+    model_registry.py     model references, ranking and debate role assignment
+    exporters.py          GMT / CSV / provenanced JSON
 
-NEW - DEBATE SYSTEM:
-✅ Multi-round AI debate for signature validation
-✅ Database-grounded evidence injection
-✅ Material UI conversational chat interface
-✅ 3 LLMs, selected live from your Groq account (no hardcoded model IDs)
-✅ Weighted voting & convergence tracking
-
-PERFORMANCE:
-- Layer 2: 10 separate searches (true diversity)
-- Layer 3: Remote API (no local 1.3GB file)
-- Layer 4: Batch verification OR Multi-round debate
-- Total: ~2-5 minutes for 35 signatures
+State model: ``signatures[sid].genes`` is the single ordered candidate list.
+Layer 3 appends to it. Layer 4 never deletes from it in the app: a gene the
+reviewer or the debate votes out is *deselected with its reason recorded*, so
+the user can overrule it in Layer 5. Approval freezes an ordered copy of the
+selected genes. Nothing downstream can silently undo an upstream layer.
 """
 
-import streamlit as st
-import pandas as pd
-import json
-import gzip
+import dataclasses
 import os
-from datetime import datetime
-from typing import Dict, List, Any, Optional, Set, Tuple
 import time
-import numpy as np
-from dataclasses import dataclass, field
-from collections import Counter, defaultdict
-import hashlib
-import pickle
-import asyncio
-import nest_asyncio
-from openai import OpenAI  # NEW: For Groq API
-import html
-import re
+from datetime import datetime
+from typing import Dict, List, Optional
 
-# Original imports
-from db_client import DatabaseClient
-from cache_client import SearchCacheClient
+import pandas as pd
+import streamlit as st
 
-# Model discovery - no Groq model ID is ever hardcoded in this file.
-# See model_registry.py for why.
+from db_client import BackendUnavailable, DatabaseClient, strength_to_min_prob
+from debate_engine import (
+    DEBATE_VERSION, DEFAULT_REMOVAL_THRESHOLD, ROLE_LABELS, DebateEngine,
+    estimate_tokens_per_model,
+)
+from exporters import build_csv, build_gmt, build_json, build_provenance
+from gene_filters import is_housekeeping
+from llm_client import EFFORT_LEVELS, LLMRouter, connect_provider
 from model_registry import (
-    GROQ_BASE_URL,
-    MSIGDB_API_URL,
-    MSIGDB_SPACE_URL,
-    WAKE_BACKEND_HINT,
-    REASONING_PREFERENCE,
-    FAST_PREFERENCE,
-    fetch_available_models,
-    pick_default,
-    resolve_debate_models,
-    next_fallback,
-    describe_model,
-    explain_llm_error,
-    is_model_not_found,
+    DEBATE_ROLES, MSIGDB_API_URL, WAKE_BACKEND_HINT, debate_diversity, describe_model,
+    explain_llm_error, fallback_chain, pick_default, resolve_debate_models,
+)
+from ncbi_client import NCBIGene
+from pipeline import (
+    DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDINGS_PATH, DEFAULT_KB_PATH, MAX_MECHANISMS,
+    PIPELINE_VERSION, apply_debate_result, apply_network_expansion, build_signatures,
+    debate_signature, decompose_query, load_resources, resolve_seed_aliases, retrieved_genes,
+    sentence_encoder, verify_signatures,
+)
+from providers import PROVIDERS, providers_in_environment
+from signature_engine import (
+    ENGINE_VERSION, GeneSignature, KnowledgeIndex, RetrievalParams, overlap_summary,
 )
 
+KB_PATH = DEFAULT_KB_PATH
+EMBEDDINGS_PATH = DEFAULT_EMBEDDINGS_PATH
+EMBEDDING_MODEL = DEFAULT_EMBEDDING_MODEL
+EFFORT_DEFAULT = "provider default"
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_available_models(api_key: str) -> List[str]:
-    """Cached model discovery. Sidebar 'Refresh model list' clears this."""
-    return fetch_available_models(api_key)
+
+# ============================================================
+# CACHED RESOURCES
+# ============================================================
+
+@st.cache_resource(show_spinner="Loading knowledge base...")
+def load_index() -> Optional[Dict]:
+    """Knowledge base + embeddings as a KnowledgeIndex, with identifying metadata."""
+    if not (os.path.exists(KB_PATH) and os.path.exists(EMBEDDINGS_PATH)):
+        return None
+    return load_resources(KB_PATH, EMBEDDINGS_PATH)
+
+
+@st.cache_resource(show_spinner="Loading embedding model...")
+def load_embedding_model():
+    from sentence_transformers import SentenceTransformer
+    return SentenceTransformer(EMBEDDING_MODEL)
+
+
+@st.cache_resource
+def get_db_client() -> DatabaseClient:
+    return DatabaseClient(MSIGDB_API_URL)
 
 
 @st.cache_data(ttl=60, show_spinner=False)
 def backend_health(api_url: str = MSIGDB_API_URL) -> bool:
-    """
-    True if the pathway API Space is reachable.
-
-    Core signature generation does not need it; DAM expansion, gene addition
-    and the debate system do. Cached briefly so we do not probe on every rerun.
-    """
+    """True if the pathway API Space answers. Cached so reruns do not re-probe."""
     import requests
     try:
         return requests.get(api_url + "/", timeout=5).status_code == 200
@@ -97,2985 +93,1037 @@ def backend_health(api_url: str = MSIGDB_API_URL) -> bool:
         return False
 
 
-def active_model(role: str = "reasoning") -> Optional[str]:
-    """
-    The model currently selected for a role, resolving a default if the user
-    has not chosen one. Never returns a hardcoded ID.
-    """
-    key = "model_reasoning" if role == "reasoning" else "model_fast"
-    chosen = st.session_state.get(key)
-    if chosen:
-        return chosen
-
-    available = st.session_state.get("available_models") or []
-    preference = REASONING_PREFERENCE if role == "reasoning" else FAST_PREFERENCE
-    return pick_default(available, preference)
-
-
-def sanitize_llm_response(text: str) -> str:
-    """Remove markdown/HTML from LLM responses for safe display"""
-    # Strip markdown code blocks
-    text = re.sub(r'```(?:json|python|html|)?\n?(.*?)\n?```', r'\1', text, flags=re.DOTALL)
-
-    # Escape HTML entities
-    text = html.escape(text)
-
-    # Preserve line breaks
-    text = text.replace('\n', '<br>')
-
-    return text
-
-
-def inject_minimal_styles():
-    """Minimal styling that respects Streamlit's default UI"""
-    st.markdown("""
-    <style>
-    /* Debate message styles only - does not override Streamlit defaults */
-    .debate-message {
-        padding: 1rem;
-        margin: 0.5rem 0;
-        border-radius: 8px;
-        border-left: 4px solid;
-    }
-
-    .debate-skeptic {
-        background: rgba(255, 107, 157, 0.1);
-        border-left-color: #FF6B9D;
-    }
-    .debate-discoverer {
-        background: rgba(78, 205, 196, 0.1);
-        border-left-color: #4ECDC4;
-    }
-    .debate-mediator {
-        background: rgba(255, 217, 61, 0.1);
-        border-left-color: #FFD93D;
-    }
-    .debate-injector {
-        background: rgba(155, 89, 182, 0.15);
-        border-left-color: #9B59B6;
-    }
-    .debate-consensus {
-        background: rgba(46, 204, 113, 0.15);
-        border-left-color: #2ECC71;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
-
-def render_debate_message_simple(speaker: str, message: str, db_sources: list = None):
-    """
-    Simple debate message display with error detection.
-
-    ✅ FIXED: Properly escapes HTML to prevent rendering issues
-    ✅ FIXED: Uses native Streamlit components for better display
-    """
-    import html
-
-    # Labels reflect the models actually resolved for this debate, so they
-    # cannot drift out of sync with the models being used.
-    _debate_models = st.session_state.get('debate_models') or {}
-
-    def _label(role: str, icon: str, name: str) -> str:
-        model_id = _debate_models.get(role)
-        return f"{icon} {name} ({describe_model(model_id)})" if model_id else f"{icon} {name}"
-
-    speaker_map = {
-        'skeptic': (_label('skeptic', '🔬', 'Skeptic'), 'rgba(255, 107, 157, 0.1)', '#FF6B9D'),
-        'discoverer': (_label('discoverer', '💡', 'Discoverer'), 'rgba(78, 205, 196, 0.1)', '#4ECDC4'),
-        'mediator': (_label('mediator', '⚖️', 'Mediator'), 'rgba(255, 217, 61, 0.1)', '#FFD93D'),
-        'injector': ('💉 Database Evidence', 'rgba(155, 89, 182, 0.15)', '#9B59B6'),
-        'consensus': ('🎯 Final Consensus', 'rgba(46, 204, 113, 0.15)', '#2ECC71')
-    }
-
-    label, bg_color, border_color = speaker_map.get(speaker, ('💬 Unknown', 'rgba(200,200,200,0.1)', '#888'))
-
-    # ✅ Detect if this is an error message
-    is_error = (
-        message.startswith("Error (") or
-        "failed:" in message.lower() or
-        "exception" in message.lower() or
-        "not found" in message.lower()
-    )
-
-    if is_error:
-        # Display as error with native Streamlit error box
-        st.error(f"**{label} (FAILED)**\n\n{message}")
-        return
-
-    # ✅ Escape HTML in the message to prevent rendering issues
-    safe_message = html.escape(message)
-
-    # Build sources display
-    sources_html = ""
-    if db_sources:
-        sources_list = ", ".join(db_sources)
-        sources_html = f'<small style="color: #888;">📊 {html.escape(sources_list)}</small><br>'
-
-    # Truncate long messages
-    display_message = safe_message if len(safe_message) <= 500 else safe_message[:500] + "..."
-
-    # ✅ Use <pre> tag with proper escaping to preserve formatting
-    st.markdown(f"""
-    <div style='background: {bg_color};
-                border-left: 4px solid {border_color};
-                padding: 1rem;
-                border-radius: 8px;
-                margin: 0.5rem 0;'>
-        <strong>{label}</strong><br>
-        {sources_html}
-        <pre style="margin-top: 0.5rem;
-                    color: #666;
-                    white-space: pre-wrap;
-                    font-family: inherit;
-                    background: transparent;
-                    border: none;
-                    padding: 0;
-                    font-size: inherit;">{display_message}</pre>
-    </div>
-    """, unsafe_allow_html=True)
-# NEW: Debate system imports
-try:
-    import importlib
-    import sys
-
-    # Force reload of debate system modules to avoid caching issues
-    if 'debate_system_with_injector' in sys.modules:
-        importlib.reload(sys.modules['debate_system_with_injector'])
-    if 'db_client_enhanced' in sys.modules:
-        importlib.reload(sys.modules['db_client_enhanced'])
-
-    from db_client_enhanced import DatabaseClientEnhanced
-    from debate_system_with_injector import (
-        MultiRoundDebateEngine,
-        DebateMode,
-        DebateResult
-    )
-
-    # Validate that we have the correct version (Groq API with api_key parameter)
-    import inspect
-    sig = inspect.signature(MultiRoundDebateEngine.__init__)
-    params = list(sig.parameters.keys())
-    if 'api_key' not in params:
-        print(f"⚠️  WARNING: MultiRoundDebateEngine has old signature: {params}")
-        print("Expected 'api_key' parameter but found old 'hf_token' parameter.")
-        print("This indicates a module caching issue. Please restart the Streamlit app.")
-        DEBATE_SYSTEM_AVAILABLE = False
-    else:
-        DEBATE_SYSTEM_AVAILABLE = True
-except ImportError as e:
-    DEBATE_SYSTEM_AVAILABLE = False
-    print(f"Debate system not available: {e}")
-
-# Apply nest_asyncio for Streamlit compatibility
-nest_asyncio.apply()
-
-
-# ============================================================
-# HOUSEKEEPING GENES FILTER (NEW: Publication-Grade)
-# ============================================================
-
-HOUSEKEEPING_GENES = {
-    # Glycolysis/Metabolism
-    'GAPDH', 'GAPDHS', 'PGK1', 'ENO1', 'PKM', 'ALDOA', 'TPI1',
-    'LDHA', 'LDHB', 'G6PD', 'PFKM', 'PFKL',
-    
-    # Cytoskeleton
-    'ACTB', 'ACTG1', 'TUBB', 'TUBA1A', 'TUBA1B', 'TUBA1C',
-    'TUBB4B', 'TUBA4A', 'TUBB2A', 'TUBB3',
-    
-    # Translation/Protein Synthesis
-    'B2M', 'PPIA', 'PPIB', 'RPLP0', 'RPL13A', 'RPS18',
-    'HPRT1', 'TBP', 'YWHAZ', 'UBC', 'EEF1A1',
-    
-    # Heat Shock
-    'HSP90AB1', 'HSPA8', 'HSPD1', 'HSPA1A', 'HSP90AA1',
-}
-
-
-def filter_housekeeping_genes(
-    genes: List[str], 
-    mode: str = 'exploratory'
-) -> Tuple[List[str], List[str]]:
-    """
-    Filter housekeeping genes based on generation mode.
-    
-    Args:
-        genes: List of gene symbols
-        mode: 'exploratory' or 'publication'
-    
-    Returns:
-        (filtered_genes, removed_genes)
-    """
-    filtered = []
-    removed = []
-    
-    for gene in genes:
-        is_housekeeping = False
-        
-        # Check exact match
-        if gene in HOUSEKEEPING_GENES:
-            is_housekeeping = True
-        
-        # Check ribosomal proteins (but exclude disease-relevant ones)
-        elif gene.startswith(('RPL', 'RPS', 'MRPL', 'MRPS')):
-            if gene not in ['RPL22', 'RPS19', 'RPS24']:
-                is_housekeeping = True
-        
-        # Check mitochondrial
-        elif gene.startswith('MT-'):
-            is_housekeeping = True
-        
-        if is_housekeeping:
-            removed.append(gene)
-            # In publication mode, actually remove them
-            if mode == 'publication':
-                continue
-        
-        filtered.append(gene)
-    
-    return filtered, removed
-
-
-# ============================================================
-# DATA CLASSES
-# ============================================================
-
-@dataclass
-class GeneSignature:
-    """A biologically meaningful gene signature with quality metrics"""
-    signature_id: str
-    signature_name: str
-    genes: List[str]
-    facet: str
-    mechanism: str
-    confidence: float
-    gene_scores: Dict[str, float] = field(default_factory=dict)
-    source_pathways: List[str] = field(default_factory=list)
-    dam_expanded: bool = False
-    llm2_verified: bool = False
-    debate_verified: bool = False
-
-    # NEW: Publication-grade quality metrics
-    stability_score: float = 1.0  # 1.0 = stable, 0.0 = controversial
-    debate_entropy: float = 0.0   # Shannon entropy from debate
-    debate_conflict: float = 0.0  # Vote variance from debate
-    
-    def to_dict(self):
-        return {
-            'signature_id': self.signature_id,
-            'signature_name': self.signature_name,
-            'genes': self.genes,
-            'gene_count': len(self.genes),
-            'facet': self.facet,
-            'mechanism': self.mechanism,
-            'confidence': self.confidence,
-            'top_genes': self.genes[:5] if len(self.genes) > 5 else self.genes,
-            'dam_expanded': self.dam_expanded,
-            'llm2_verified': self.llm2_verified,
-            'debate_verified': self.debate_verified,
-            # NEW: Quality metrics for publication
-            'stability_score': self.stability_score,
-            'debate_quality': {
-                'entropy': self.debate_entropy,
-                'conflict': self.debate_conflict,
-                'interpretation': self._interpret_quality()
-            }
-        }
-
-    def _interpret_quality(self) -> str:
-        """Interpret quality metrics for users"""
-        if self.stability_score >= 0.8:
-            return "HIGH_CONFIDENCE"
-        elif self.stability_score >= 0.5:
-            return "MODERATE_CONFIDENCE"
-        else:
-            return "REQUIRES_MANUAL_REVIEW"
-    
-    def gene_set_hash(self) -> str:
-        """Hash of gene set for deduplication"""
-        return hashlib.md5('|'.join(sorted(self.genes)).encode()).hexdigest()
-
-
-@dataclass
-class DecompositionResult:
-    """Result from LLM decomposition"""
-    facets: List[Dict[str, str]]
-    granularity_level: int
-    timestamp: str
-    llm_model: str
-
-
-@dataclass
-class LayerTiming:
-    """Track timing per layer"""
-    layer_name: str
-    start_time: float
-    end_time: Optional[float] = None
-    
-    @property
-    def duration(self) -> float:
-        if self.end_time:
-            return self.end_time - self.start_time
-        return time.time() - self.start_time
-    
-    @property
-    def duration_str(self) -> str:
-        dur = self.duration
-        if dur < 60:
-            return f"{dur:.1f}s"
-        else:
-            return f"{dur/60:.1f}m"
-
-
-# ============================================================
-# PRECOMPUTED LOADERS
-# ============================================================
-
-@st.cache_data(show_spinner=False)
-def load_precomputed_embeddings_or_fail(path="data/pathway_embeddings.pkl"):
-    """Load precomputed pathway embeddings with diagnostics"""
-    if not os.path.exists(path):
-        st.error(f"❌ Embeddings file not found: {path}")
-        st.info("💡 Make sure pathway_embeddings.pkl is in the data/ folder")
-        st.stop()
-
-    try:
-        with open(path, "rb") as f:
-            package = pickle.load(f)
-    except Exception as e:
-        st.error(f"❌ Failed to load embeddings: {e}")
-        st.stop()
-
-    # FIX A: Better diagnostics
-    required_keys = {"embeddings"}
-    found_keys = set(package.keys())
-    
-    if not required_keys.issubset(found_keys):
-        st.error(
-            f"❌ Invalid embeddings file!\n\n"
-            f"Expected keys: {required_keys}\n"
-            f"Found keys: {found_keys}\n\n"
-            f"💡 This looks like a DAM file, not embeddings. "
-            f"Make sure you're loading pathway_embeddings.pkl"
-        )
-        st.stop()
-
-    return package["embeddings"]
-
-
-# ============================================================
-# SIGNATURE BUILDER - WITH DEDUPLICATION & HOUSEKEEPING FILTER
-# ============================================================
-
-class SignatureBuilder:
-    """Builds gene signatures with deduplication and dynamic variants"""
-    
-    def __init__(self, min_genes: int = 10, max_genes: int = 20):
-        self.min_genes = min_genes
-        self.max_genes = max_genes
-        self.seen_signatures: List[Set[str]] = []  # For deduplication using Jaccard
-    
-    def build_signature_from_pathways(
-        self,
-        facet_name: str,
-        mechanism_name: str,
-        pathways_dict: Dict[str, List[str]],
-        pathway_similarities: Dict[str, float]
-    ) -> Optional[GeneSignature]:
-        """Build ONE signature using relevance scoring"""
-        
-        if not pathways_dict:
-            return None
-        
-        gene_scores = defaultdict(float)
-        source_pathways = []
-        
-        for pathway_id, genes in pathways_dict.items():
-            similarity = pathway_similarities.get(pathway_id, 0.0)
-            source_pathways.append(pathway_id)
-            
-            for gene in genes:
-                gene_scores[gene] += similarity
-        
-        if not gene_scores:
-            return None
-        
-        ranked_genes = sorted(gene_scores.items(), key=lambda x: x[1], reverse=True)
-        selected_pairs = ranked_genes[:self.max_genes]
-        
-        if len(selected_pairs) < self.min_genes:
-            return None
-        
-        selected_genes = [gene for gene, score in selected_pairs]
-        
-        # NEW: Apply housekeeping filter
-        mode = st.session_state.get('generation_mode', 'exploratory')
-        selected_genes, removed_hk = filter_housekeeping_genes(selected_genes, mode)
-        
-        # NEW: Log what was filtered
-        if removed_hk and len(removed_hk) > 0:
-            if mode == 'publication':
-                st.caption(f"🔬 Filtered {len(removed_hk)} housekeeping genes: {', '.join(removed_hk[:5])}{'...' if len(removed_hk) > 5 else ''}")
-            else:
-                st.caption(f"ℹ️ Contains {len(removed_hk)} housekeeping genes (flagged but not removed in exploratory mode)")
-        
-        # NEW: Check minimum AFTER filtering
-        if len(selected_genes) < self.min_genes:
-            # FIX: Backfill if filtering dropped below minimum
-            current_set = set(selected_genes)
-            removed_set = set(removed_hk)
-            
-            for gene, score in ranked_genes:
-                if len(selected_genes) >= self.min_genes:
-                    break
-                
-                if gene not in current_set and gene not in removed_set:
-                    # Double check it isn't a housekeeping gene we missed (redundant but safe)
-                    is_hk = False
-                    if gene in HOUSEKEEPING_GENES: 
-                        is_hk = True
-                    
-                    if not is_hk:
-                        selected_genes.append(gene)
-                        current_set.add(gene)
-            
-            # If still not enough, return None
-            if len(selected_genes) < self.min_genes:
-                return None
-        
-        # Rebuild scores dict with filtered genes
-        scores_dict = {gene: score for gene, score in selected_pairs if gene in selected_genes}
-        
-        avg_score = np.mean([score for gene, score in scores_dict.items()])
-        confidence = min(0.99, avg_score)
-        
-        sig_id = f"{self._make_id(facet_name)}_{self._make_id(mechanism_name)}"
-        
-        return GeneSignature(
-            signature_id=sig_id,
-            signature_name=f"{facet_name} - {mechanism_name}",
-            genes=selected_genes,
-            facet=facet_name,
-            mechanism=mechanism_name,
-            confidence=confidence,
-            gene_scores=scores_dict,
-            source_pathways=source_pathways[:5]
-        )
-    
-    def build_multiple_mechanisms_dynamic(
-        self,
-        facet_name: str,
-        pathways_dict: Dict[str, List[str]],
-        pathway_similarities: Dict[str, float],
-        num_variants: int = 3
-    ) -> List[GeneSignature]:
-        """
-        FIX ROOT CAUSE #2: Dynamic variant generation
-        Generate exactly num_variants unique signatures
-        """
-        
-        signatures = []
-        
-        # Sort pathways by similarity
-        sorted_pathways = sorted(
-            pathway_similarities.items(), 
-            key=lambda x: x[1], 
-            reverse=True
-        )
-        
-        if len(pathways_dict) < 3:
-            # Not enough pathways for variants - just do core
-            core_sig = self.build_signature_from_pathways(
-                facet_name, "Core Markers", pathways_dict, pathway_similarities
-            )
-            if core_sig:
-                signatures.append(core_sig)
-            return signatures
-        
-        # Strategy 1: Core (top pathways)
-        top_count = max(3, len(sorted_pathways) // 3)
-        top_ids = [pid for pid, _ in sorted_pathways[:top_count]]
-        top_pathways = {pid: pathways_dict[pid] for pid in top_ids if pid in pathways_dict}
-        top_sims = {pid: pathway_similarities[pid] for pid in top_ids if pid in pathway_similarities}
-        
-        core_sig = self.build_signature_from_pathways(
-            facet_name, "Core Markers", top_pathways, top_sims
-        )
-        if core_sig and self._is_unique_signature(core_sig):
-            signatures.append(core_sig)
-        
-        # Strategy 2: Extended (middle pathways)
-        if len(signatures) < num_variants and len(sorted_pathways) >= 6:
-            mid_start = len(sorted_pathways) // 3
-            mid_end = 2 * len(sorted_pathways) // 3
-            mid_ids = [pid for pid, _ in sorted_pathways[mid_start:mid_end]]
-            mid_pathways = {pid: pathways_dict[pid] for pid in mid_ids if pid in pathways_dict}
-            mid_sims = {pid: pathway_similarities[pid] for pid in mid_ids if pid in pathway_similarities}
-            
-            extended_sig = self.build_signature_from_pathways(
-                facet_name, "Extended Network", mid_pathways, mid_sims
-            )
-            if extended_sig and self._is_unique_signature(extended_sig):
-                signatures.append(extended_sig)
-        
-        # Strategy 3: Regulatory (bottom pathways)
-        if len(signatures) < num_variants and len(sorted_pathways) >= 6:
-            bottom_start = 2 * len(sorted_pathways) // 3
-            bottom_ids = [pid for pid, _ in sorted_pathways[bottom_start:]]
-            bottom_pathways = {pid: pathways_dict[pid] for pid in bottom_ids if pid in pathways_dict}
-            bottom_sims = {pid: pathway_similarities[pid] for pid in bottom_ids if pid in pathway_similarities}
-            
-            regulatory_sig = self.build_signature_from_pathways(
-                facet_name, "Regulatory Context", bottom_pathways, bottom_sims
-            )
-            if regulatory_sig and self._is_unique_signature(regulatory_sig):
-                signatures.append(regulatory_sig)
-        
-        # If we still need more variants, try different sizes
-        while len(signatures) < num_variants and len(pathways_dict) >= 3:
-            # Random subset strategy
-            import random
-            sample_size = random.randint(3, min(10, len(pathways_dict)))
-            sample_ids = random.sample(list(pathways_dict.keys()), sample_size)
-            sample_pathways = {pid: pathways_dict[pid] for pid in sample_ids}
-            sample_sims = {pid: pathway_similarities[pid] for pid in sample_ids if pid in pathway_similarities}
-            
-            variant_sig = self.build_signature_from_pathways(
-                facet_name, f"Variant {len(signatures)+1}", sample_pathways, sample_sims
-            )
-            if variant_sig and self._is_unique_signature(variant_sig):
-                signatures.append(variant_sig)
-            else:
-                break  # Can't generate more unique variants
-        
-        return signatures
-    
-    def _is_unique_signature(self, sig: GeneSignature) -> bool:
-        """
-        FIX C: Signature deduplication using Jaccard Similarity
-        Allow up to 80% overlap (Jaccard similarity < 0.8)
-        """
-        new_gene_set = set(sig.genes)
-        
-        for seen_set in self.seen_signatures:
-            intersection = len(new_gene_set.intersection(seen_set))
-            union = len(new_gene_set.union(seen_set))
-            
-            if union == 0:
-                continue
-                
-            jaccard = intersection / union
-            
-            # If too similar (high overlap), reject as duplicate
-            if jaccard > 0.8:  # 80% similarity threshold
-                return False
-        
-        self.seen_signatures.append(new_gene_set)
-        return True
-
-    def _make_id(self, name: str) -> str:
-        return name.upper().replace(' ', '_').replace('-', '_').replace('/', '_')
-
-
-# ============================================================
-# OPTIMIZED SEMANTIC SEARCH
-# ============================================================
-
-@st.cache_resource
-def load_embedding_model():
-    """Load sentence transformer (cached as resource)"""
-    try:
-        from sentence_transformers import SentenceTransformer
-        model = SentenceTransformer('all-MiniLM-L6-v2')
-        return model
-    except Exception as e:
-        st.warning(f"Could not load embedding model: {e}")
-        return None
-
-
-def fast_semantic_search(
-    query: str,
-    pathway_embeddings: Dict[str, np.ndarray],
-    pathways_dict: Dict[str, List[str]],
-    model,
-    top_k: int = 50
-) -> Tuple[Dict[str, List[str]], Dict[str, float]]:
-    """Fast semantic search using precomputed embeddings"""
-    
-    if not pathway_embeddings:
-        return {}, {}
-    
-    # Encode and normalize query
-    query_emb = model.encode(query, convert_to_numpy=True)
-    query_emb = query_emb / (np.linalg.norm(query_emb) + 1e-8)
-    
-    # Vectorized cosine similarity
-    similarities = []
-    for pid, pathway_emb in pathway_embeddings.items():
-        similarity = float(np.dot(query_emb, pathway_emb))
-        similarities.append((pid, similarity))
-    
-    # Sort and select top K
-    similarities.sort(key=lambda x: x[1], reverse=True)
-    top_pathways = similarities[:top_k]
-    
-    # Return results
-    selected_pathways = {pid: pathways_dict[pid] for pid, _ in top_pathways if pid in pathways_dict}
-    similarity_dict = {pid: score for pid, score in top_pathways}
-    
-    return selected_pathways, similarity_dict
-
-
-# ============================================================
-# LLM FUNCTIONS
-# ============================================================
-
-def decompose_with_granularity(
-    query: str,
-    granularity_count: int,
-    groq_api_key: str,
-    model: str = None
-) -> Optional[DecompositionResult]:
-    """
-    Decompose a query into EXACTLY N mechanisms using the selected Groq model.
-
-    The model is resolved at runtime from live discovery (see model_registry).
-    If it turns out to be retired mid-flight we retry once against the next
-    live model rather than failing the whole layer.
-    """
-
-    try:
-        # Use OpenAI client with Groq base URL
-        client = OpenAI(
-            api_key=groq_api_key,
-            base_url=GROQ_BASE_URL
-        )
-
-        # Resolved from the sidebar selection / live discovery - never hardcoded
-        model = model or active_model("reasoning")
-        if not model:
-            st.error(
-                "**No model selected**\n\n"
-                "Validate your Groq API key in the sidebar first so the app can "
-                "discover which models are available."
-            )
-            return None
-
-        prompt = f"""Decompose this biological query into EXACTLY {granularity_count} SPECIFIC, NON-OVERLAPPING molecular mechanisms.
-
-Query: "{query}"
-
-REQUIREMENTS:
-1. Generate EXACTLY {granularity_count} mechanisms (no more, no less)
-2. Each mechanism must be maximally granular (10-20 genes per mechanism)
-3. No overlap between mechanisms
-4. Each mechanism must be biologically distinct and specific
-
-Output JSON ONLY (no preamble, no markdown):
-{{
-  "facets": [
-    {{
-      "facet_id": "F1",
-      "facet_name": "Mechanism Name",
-      "mechanism_queries": ["search query terms"]
-    }},
-    ...
-  ]
-}}"""
-
-        try:
-            response = client.chat.completions.create(
-                messages=[{"role": "user", "content": prompt}],
-                model=model,
-                max_tokens=3000,
-                temperature=0.3
-            )
-        except Exception as first_error:
-            # A retired model should not kill the layer. Retry once on the next
-            # live model and tell the user what happened.
-            if not is_model_not_found(first_error):
-                raise
-
-            available = st.session_state.get('available_models') or []
-            fallback = next_fallback(model, available, REASONING_PREFERENCE)
-            if not fallback:
-                raise
-
-            st.warning(
-                f"`{model}` is no longer available on Groq. "
-                f"Retrying with `{fallback}`."
-            )
-            model = fallback
-            st.session_state.model_reasoning = fallback
-            response = client.chat.completions.create(
-                messages=[{"role": "user", "content": prompt}],
-                model=model,
-                max_tokens=3000,
-                temperature=0.3
-            )
-
-        raw = response.choices[0].message.content
-
-        # Parse JSON
-        cleaned = raw.strip()
-        if '```json' in cleaned:
-            cleaned = cleaned.split('```json')[1].split('```')[0].strip()
-        elif '```' in cleaned:
-            parts = cleaned.split('```')
-            if len(parts) >= 3:
-                cleaned = parts[1].strip()
-        
-        if not cleaned.startswith('{'):
-            start = cleaned.find('{')
-            if start != -1:
-                cleaned = cleaned[start:]
-        
-        data = json.loads(cleaned)
-        facets = data.get('facets', [])
-
-        return DecompositionResult(
-            facets=facets,
-            granularity_level=granularity_count,
-            timestamp=datetime.now().isoformat(),
-            llm_model=model  # Use the Groq model name
-        )
-
-    except Exception as e:
-        st.error(explain_llm_error(e, model))
-        return None
-
-
-def verify_signatures_batch(
-    signatures: List[GeneSignature],
-    original_query: str,
-    mode: str,
-    llm2_model: str,
-    groq_api_key: str,
-    context_options: List[str],
-    batch_size: int = 5
-) -> Dict[str, Any]:
-    """
-    FIX D: Batch verification with proper signature ID mapping
-    NEW: Context-aware verification for publication mode
-
-    Args:
-        batch_size: Number of signatures per API call
-
-    Returns:
-        Dict[signature_id, verification_result]
-    """
-
-    all_suggestions = {}
-
-    # FIXED: previously this hardcoded a model and silently ignored llm2_model,
-    # so the Layer 4 dropdown had no effect at all. Hoisted above the try so the
-    # error handler can always name the model that failed.
-    model_id = llm2_model or active_model("reasoning")
-
-    try:
-        # Use OpenAI client with Groq
-        client = OpenAI(
-            api_key=groq_api_key,
-            base_url=GROQ_BASE_URL
-        )
-
-        if not model_id:
-            st.error(
-                "**No model selected**\n\n"
-                "Validate your Groq API key in the sidebar so the app can "
-                "discover available models."
-            )
-            return {}
-
-        # NEW: Get biological context if available
-        bio_context = st.session_state.get('bio_context')
-        generation_mode = st.session_state.get('generation_mode', 'exploratory')
-        
-        # NEW: Build context string for LLM
-        if bio_context:
-            context_str = f"""
-BIOLOGICAL CONTEXT:
-- Species: {bio_context['species']}
-- Tissue: {bio_context['tissue']}
-- Disease: {bio_context['disease']}
-"""
-            if bio_context.get('cell_type'):
-                context_str += f"- Cell Type: {bio_context['cell_type']}\n"
-            if bio_context.get('treatment'):
-                context_str += f"- Treatment: {bio_context['treatment']}\n"
-            
-            if generation_mode == 'publication':
-                context_str += "\n⚠️ PUBLICATION MODE: Apply strict biological validation standards.\n"
-        else:
-            context_str = "BIOLOGICAL CONTEXT: Not specified (exploratory mode)\n"
-        
-        # Process in batches
-        num_batches = (len(signatures) + batch_size - 1) // batch_size
-        
-        for batch_idx in range(num_batches):
-            start_idx = batch_idx * batch_size
-            end_idx = min(start_idx + batch_size, len(signatures))
-            batch = signatures[start_idx:end_idx]
-            
-            # FIX D: Use actual signature IDs in prompt
-            signatures_text = "\n\n".join([
-                f"{sig.signature_id}:\n"  # Use actual ID, not position
-                f"Name: {sig.signature_name}\n"
-                f"Mechanism: {sig.mechanism}\n"
-                f"Genes ({len(sig.genes)}): {', '.join(sig.genes)}"
-                for sig in batch
-            ])
-            
-            if mode == "verify_only":
-                task = "Identify genes that do NOT belong (if any)."
-            else:
-                task = "Identify genes to remove (if any) AND suggest genes to add (max 3 per signature)."
-            
-            # NEW: Include context in prompt
-            prompt = f"""Review these {len(batch)} gene signatures for biological correctness.
-
-{context_str}
-
-Original Query: {original_query}
-
-{signatures_text}
-
-Validation Criteria ({generation_mode} mode):
-1. Remove housekeeping genes (GAPDH, ACTB, B2M, ribosomal proteins)
-2. {"Check tissue specificity for " + bio_context['tissue'] if bio_context else "Check general biological relevance"}
-3. Verify pathway coherence (no contradictory mechanisms)
-4. {"Require strong evidence for publication" if generation_mode == 'publication' else "Flag uncertain genes"}
-
-Task: {task}
-
-Output JSON ONLY using the EXACT signature IDs shown above:
-{{
-  "SIGNATURE_ID_1": {{
-    "genes_to_remove": ["GENE1"],
-    "genes_to_add": ["GENE2", "GENE3"],
-    "reasoning": {{"GENE1": "why remove", "GENE2": "why add"}}
-  }},
-  "SIGNATURE_ID_2": {{...}},
-  ...
-}}
-
-If no changes needed, return empty lists."""
-
-            try:
-                # FIX E: Add LLM logging
-                st.caption(f"🔄 Batch {batch_idx+1}/{num_batches}: Verifying {len(batch)} signatures...")
-
-                response = client.chat.completions.create(
-                    messages=[{"role": "user", "content": prompt}],
-                    model=model_id,
-                    max_tokens=2000,
-                    temperature=0.2
-                )
-
-                raw = response.choices[0].message.content
-                
-                # Parse JSON
-                cleaned = raw.strip()
-                if '```json' in cleaned:
-                    cleaned = cleaned.split('```json')[1].split('```')[0].strip()
-                elif '```' in cleaned:
-                    parts = cleaned.split('```')
-                    if len(parts) >= 3:
-                        cleaned = parts[1].strip()
-                
-                if not cleaned.startswith('{'):
-                    start = cleaned.find('{')
-                    if start != -1:
-                        cleaned = cleaned[start:]
-                
-                batch_results = json.loads(cleaned)
-                
-                # FIX D: Map using actual signature IDs
-                for sig in batch:
-                    if sig.signature_id in batch_results:
-                        all_suggestions[sig.signature_id] = batch_results[sig.signature_id]
-                    else:
-                        # No suggestions for this signature
-                        all_suggestions[sig.signature_id] = {
-                            "genes_to_remove": [],
-                            "genes_to_add": [],
-                            "reasoning": {}
-                        }
-                        
-            except Exception as e:
-                st.warning(
-                    f"Batch {batch_idx + 1}/{num_batches} failed. "
-                    + explain_llm_error(e, model_id)
-                )
-                # Add empty suggestions for failed batch
-                for sig in batch:
-                    all_suggestions[sig.signature_id] = {
-                        "genes_to_remove": [],
-                        "genes_to_add": [],
-                        "reasoning": {}
-                    }
-        
-        return all_suggestions
-        
-    except Exception as e:
-        st.error(explain_llm_error(e, model_id))
-        return {}
-
-
-# ============================================================
-# NEW: DEBATE SYSTEM WRAPPERS
-# ============================================================
-
-def run_validation_debate_sync(
-    genes: List[str],
-    tissue_context: Optional[str] = None,
-    max_rounds: int = 10
-) -> Optional[DebateResult]:
-    """
-    Synchronous wrapper for validation debate with enhanced error handling.
-    """
-    if not DEBATE_SYSTEM_AVAILABLE:
-        st.error("Debate system not available. Install required modules.")
-        return None
-
-    try:
-        # Resolve three DISTINCT live models for the adversarial roles.
-        # Previously these were three hardcoded IDs, all of which were dead.
-        available = st.session_state.get('available_models') or []
-        debate_models = resolve_debate_models(available)
-        st.session_state.debate_models = debate_models
-
-        debate_engine = MultiRoundDebateEngine(
-            api_key=st.session_state.groq_api_key,
-            db_client=st.session_state.db_client_enhanced,
-            base_url=GROQ_BASE_URL,
-            model_configs=debate_models,
-            # Safe to validate now that IDs come from live discovery.
-            validate_models=True
-        )
-
-        # Run async debate
-        async def run():
-            return await debate_engine.run_validation_debate(
-                genes=genes,
-                tissue_context=tissue_context,
-                max_rounds=max_rounds,
-                convergence_threshold=0.85
-            )
-
-        loop = asyncio.get_event_loop()
-        result = loop.run_until_complete(run())
-
-        # Calculate stability score from debate evolution
-        if result and hasattr(result, 'decision_metrics'):
-            # Stability = 1 - (entropy * 0.5 + conflict * 0.5)
-            # High entropy or conflict = low stability
-            entropy = result.decision_metrics.get('entropy', 0.0)
-            conflict = result.decision_metrics.get('conflict', 0.0)
-
-            stability = 1.0 - (entropy * 0.5 + conflict * 0.5)
-            stability = max(0.0, min(1.0, stability))  # Clamp to [0,1]
-
-            # Store in result for later use
-            result.stability_score = stability
-
-        return result
-
-    except Exception as e:
-        st.error(f"❌ Debate failed: {e}")
-
-        # Provide helpful error messages
-        error_str = str(e).lower()
-        if "model" in error_str and ("not found" in error_str or "does not exist" in error_str):
-            st.warning("""
-            **Model Not Found Error**
-
-            One or more Groq models are unavailable. This usually means:
-            1. The model ID is incorrect
-            2. The model was deprecated by Groq
-            3. Your API key doesn't have access to that model
-
-            **Solution**: Run the diagnostic tool to find working models:
-            ```bash
-            python groq_model_diagnostic.py <your_groq_api_key>
-            ```
-            """)
-        elif "api" in error_str and "key" in error_str:
-            st.warning("Check your Groq API key. It may be invalid or expired.")
-        elif "rate" in error_str or "limit" in error_str:
-            st.warning("Rate limit exceeded. Wait a few seconds and try again.")
-
-        # Show full traceback in expander
-        with st.expander("🔍 View Full Error Details"):
-            import traceback
-            st.code(traceback.format_exc())
-
-        return None
-
-
-def initialize_enhanced_db_client():
-    """Initialize enhanced database client for debate system."""
-    if not DEBATE_SYSTEM_AVAILABLE:
-        return False
-    
-    if 'db_client_enhanced' not in st.session_state or st.session_state.db_client_enhanced is None:
-        try:
-            api_url = MSIGDB_API_URL
-            st.session_state.db_client_enhanced = DatabaseClientEnhanced(api_url)
-            return True
-        except Exception as e:
-            st.error(
-                "**The debate system needs the pathway API, which is asleep "
-                "or offline.**\n\n"
-                + WAKE_BACKEND_HINT
-                + "\n\nCore signature generation is unaffected.\n\n"
-                "Still failing after it says *Running*? If you own the Space, "
-                f"a **Factory rebuild** in its Settings usually clears it.\n\n`{e}`"
-            )
-            return False
-    return True
-
-
 # ============================================================
 # SESSION STATE
 # ============================================================
 
+DEFAULTS = {
+    'connections': {}, 'provider_error': None, 'environment_checked': False,
+    'generation_mode': 'exploratory', 'bio_context': None,
+    'run_id': 0,
+    'facets': [], 'l1_provenance': None, 'granularity_approved': False, 'selected_facet_ids': [],
+    'signatures': {}, 'retrieval_params': None, 'query_used': '',
+    'network_additions': {}, 'expansion_settings': None,
+    'suggestions': {}, 'review_calls': [], 'review_model': None,
+    'debates': {}, 'debate_models': {}, 'debate_problems': [],
+    'deselected': {}, 'approved': {},
+    'layer_timings': {},
+}
+
+# Keys cleared when an upstream layer is re-run, so stale results never leak
+# into a new run's export.
+DOWNSTREAM = {
+    1: ['facets', 'l1_provenance', 'granularity_approved', 'selected_facet_ids'],
+    2: ['signatures', 'retrieval_params', 'network_additions', 'expansion_settings',
+        'suggestions', 'review_calls', 'review_model', 'debates', 'debate_models',
+        'debate_problems', 'deselected', 'approved'],
+}
+
+
+def _fresh(value):
+    return type(value)() if isinstance(value, (dict, list)) else value
+
+
 def initialize_session_state():
-    """Initialize session state with proper defaults"""
-    defaults = {
-        'groq_api_key': None,       # NEW: Groq API key
-        'token_validated': False,
-        'token_error': False,  # FIX B: Add explicit error flag
-        'token_error_detail': None,  # Actual reason, not a blanket "bad key"
-        'kb_loaded': False,
-
-        # Model discovery (populated when the API key is validated)
-        'available_models': [],
-        'model_reasoning': None,
-        'model_fast': None,
-
-        # NEW: Publication-grade settings
-        'generation_mode': 'exploratory',  # 'exploratory' or 'publication'
-        'bio_context': None,
-        
-        # Layer 1
-        'decomposition_result': None,
-        'selected_mechanism_ids': [],
-        'granularity_approved': False,
-        
-        # Layer 2
-        'signature_ids': [],
-        
-        # Layer 3
-        'dam_enabled': False,
-        
-        # Layer 4
-        'llm2_suggestions': {},
-        'verification_method': 'batch',  # NEW: 'batch' or 'debate'
-        
-        # NEW: Debate system
-        'debate_enabled': False,
-        'debate_num_rounds': 10,
-        'current_debate_result': None,
-        'debate_history': [],
-        'db_client_enhanced': None,
-        
-        # Layer 5
-        'final_approved_signature_ids': [],
-        'gene_selections': {},  # For text-based UI
-        
-        # Timing
-        'layer_timings': [],
-    }
-    
-    for key, value in defaults.items():
+    for key, value in DEFAULTS.items():
         if key not in st.session_state:
-            st.session_state[key] = value
+            st.session_state[key] = _fresh(value)
 
 
-# ============================================================
-# KB LOADING
-# ============================================================
+def reset_from(layer: int):
+    """Clear the results of ``layer`` and everything after it."""
+    for level, keys in DOWNSTREAM.items():
+        if level >= layer:
+            for key in keys:
+                st.session_state[key] = _fresh(DEFAULTS[key])
+    st.session_state.layer_timings = {
+        name: t for name, t in st.session_state.layer_timings.items()
+        if int(name.split(':')[0].split()[-1]) < layer
+    }
+    st.session_state.run_id += 1
 
-@st.cache_data(show_spinner=False)
-def load_knowledge_base_cached() -> Optional[Dict[str, List[str]]]:
-    """Load KB and cache"""
-    possible_paths = [
-        "data/knowledge_base.json.gz",
-        "./data/knowledge_base.json.gz",
-        "../data/knowledge_base.json.gz",
-    ]
-    
-    for path in possible_paths:
-        if os.path.exists(path):
-            try:
-                with gzip.open(path, 'rt', encoding='utf-8') as f:
-                    kb_data = json.load(f)
-                
-                pathways = kb_data.get('pathways', {})
-                return pathways
-            except Exception as e:
-                st.error(f"Error loading KB: {e}")
-                return None
-    
-    return None
+
+def record_timing(name: str, started: float):
+    seconds = time.time() - started
+    st.session_state.layer_timings[name] = f"{seconds:.1f}s" if seconds < 60 else f"{seconds / 60:.1f}m"
+
+
+def invalidate_approval(signature_id: str):
+    """A signature edited after approval must be approved again."""
+    st.session_state.approved.pop(signature_id, None)
+
+
+def ordered_signatures() -> List[GeneSignature]:
+    return list(st.session_state.signatures.values())
+
+
+# ---------------------------------------------------------------- providers
+
+def available_models() -> List[str]:
+    """Every model of every connected provider, as 'provider:model' references."""
+    return [ref for connection in st.session_state.connections.values() for ref in connection.refs()]
+
+
+def get_router() -> LLMRouter:
+    effort = st.session_state.get('effort_choice')
+    return LLMRouter(st.session_state.connections, effort=effort if effort in EFFORT_LEVELS else None)
+
+
+def reasoning_model() -> Optional[str]:
+    available = available_models()
+    chosen = st.session_state.get('model_reasoning')
+    return chosen if chosen in available else pick_default(available)
+
+
+def fallbacks_for(model: str) -> List[str]:
+    return fallback_chain(model, available_models())
+
+
+def model_selectbox(container, label: str, default: Optional[str], key: str, **kwargs) -> str:
+    """
+    Model picker that survives the live model list changing under it.
+
+    Streamlit forbids assigning to a widget key after the widget exists, so a
+    stale selection (a model retired or a provider disconnected since it was
+    chosen) is repaired here, before instantiation.
+    """
+    available = available_models()
+    if st.session_state.get(key) not in available:
+        st.session_state[key] = default if default in available else available[0]
+    return container.selectbox(label, available, key=key, **kwargs)
+
+
+def connect_from_environment():
+    """Once per session: connect every provider whose API key is in the environment."""
+    if st.session_state.environment_checked:
+        return
+    st.session_state.environment_checked = True
+    for provider_id, key in providers_in_environment().items():
+        if provider_id in st.session_state.connections:
+            continue
+        try:
+            st.session_state.connections[provider_id] = connect_provider(provider_id, key)
+        except Exception as exc:
+            st.session_state.provider_error = (f"{PROVIDERS[provider_id].label} (key from "
+                                               f"environment): {explain_llm_error(exc)}")
 
 
 # ============================================================
 # SIDEBAR
 # ============================================================
 
-def render_sidebar():
-    """Render sidebar with token input and timing info"""
-    with st.sidebar:
-        st.markdown("### 🔧 Configuration")
+def render_provider_panel():
+    connections = st.session_state.connections
+    with st.expander("Providers & model", expanded=not connections):
+        by_label = {provider.label: provider for provider in PROVIDERS.values()}
+        provider = by_label[st.selectbox("Provider", list(by_label), key="provider_choice")]
+        if provider.note:
+            st.caption(provider.note)
+        key_label = "API key" if provider.needs_key else "API key (optional)"
+        key_input = st.text_input(f"{provider.label} {key_label}", type="password",
+                                  key=f"key_{provider.id}")
+        base_url = None
+        if provider.edit_base_url:
+            base_url = st.text_input("Base URL", value=provider.base_url or "",
+                                     key=f"url_{provider.id}", placeholder="https://host/v1")
+        if provider.key_url:
+            st.caption(f"Get a key: {provider.key_url}")
 
-        with st.expander("🔑 API & Models", expanded=not st.session_state.token_validated):
-            st.caption("Get your free API key at console.groq.com")
+        if st.button("Connect", type="primary"):
+            try:
+                connections[provider.id] = connect_provider(provider.id, key_input, base_url)
+                st.session_state.provider_error = None
+            except Exception as exc:
+                st.session_state.provider_error = f"{provider.label}: {explain_llm_error(exc)}"
+            st.rerun()
 
-            key_input = st.text_input(
-                "Groq API Key",
-                type="password",
-                value=st.session_state.groq_api_key or "",
-                help="Free tier available at console.groq.com"
-            )
-
-            if st.button("Validate Key"):
-                try:
-                    # Validating the key and discovering models are the same
-                    # call, so keep the result instead of discarding it.
-                    models = fetch_available_models(key_input)
-
-                    st.session_state.groq_api_key = key_input
-                    st.session_state.available_models = models
-                    st.session_state.token_validated = True
-                    st.session_state.token_error = False
-                    st.session_state.token_error_detail = None
-
-                    # Seed defaults from what is actually live right now.
-                    st.session_state.model_reasoning = pick_default(models, REASONING_PREFERENCE)
-                    st.session_state.model_fast = pick_default(models, FAST_PREFERENCE)
-                    get_available_models.clear()
+        if connections:
+            st.markdown("**Connected**")
+            for provider_id in list(connections):
+                connection = connections[provider_id]
+                col1, col2 = st.columns([3, 2])
+                col1.caption(f"{connection.provider.label} · {len(connection.models)} models")
+                if col2.button("Remove", key=f"disconnect_{provider_id}"):
+                    del connections[provider_id]
                     st.rerun()
-                except Exception as e:
-                    st.session_state.token_validated = False
-                    st.session_state.token_error = True
-                    # FIXED: the real reason used to be discarded, so timeouts
-                    # and 404s were both reported as "Invalid API key".
-                    st.session_state.token_error_detail = explain_llm_error(e)
-                    st.session_state.groq_api_key = None
-                    st.session_state.available_models = []
-                    st.rerun()
+                if connection.warning:
+                    st.caption(f"⚠️ {connection.warning}")
 
-            # Model pickers - populated from live discovery
-            available = st.session_state.get('available_models') or []
-            if available:
-                st.markdown("**🤖 Models**")
-                st.caption(f"{len(available)} chat models live on your account")
+            connected = {connections[pid].provider.label: pid for pid in connections}
+            st.caption("Model missing from a list? Add its ID exactly as the provider names it.")
+            target = connected[st.selectbox("Add a model to", list(connected), key="manual_provider")]
+            manual = st.text_input("Model ID", key="manual_model")
+            if st.button("Add model") and manual.strip():
+                connections[target].models.setdefault(manual.strip(), {})
+                st.rerun()
 
-                reasoning_default = active_model("reasoning")
-                st.selectbox(
-                    "Reasoning model",
-                    available,
-                    index=available.index(reasoning_default) if reasoning_default in available else 0,
-                    key="model_reasoning",
-                    help="Used for query decomposition (Layer 1) and verification."
-                )
-
-                fast_default = active_model("fast")
-                st.selectbox(
-                    "Fast model",
-                    available,
-                    index=available.index(fast_default) if fast_default in available else 0,
-                    key="model_fast",
-                    help="Used where latency matters more than depth."
-                )
-
-                if st.button("↻ Refresh model list"):
-                    get_available_models.clear()
+        available = available_models()
+        if available:
+            model_selectbox(st, "Reasoning model", pick_default(available), "model_reasoning",
+                            help="Used for query decomposition (Layer 1) and as the default "
+                                 "for single-model review (Layer 4).")
+            st.selectbox("Reasoning effort", [EFFORT_DEFAULT, *EFFORT_LEVELS], key="effort_choice",
+                         help="How much hidden reasoning to request. 'provider default' keeps "
+                              "free-tier models inside their token limits; raise it on paid keys "
+                              "for harder questions. Models that do not support it ignore it.")
+            if st.button("Refresh model lists"):
+                for provider_id, connection in list(connections.items()):
                     try:
-                        st.session_state.available_models = fetch_available_models(
-                            st.session_state.groq_api_key
-                        )
-                        st.success("Model list refreshed")
-                    except Exception as e:
-                        st.error(explain_llm_error(e))
-                    st.rerun()
+                        connections[provider_id] = connect_provider(
+                            provider_id, connection.api_key, connection.base_url)
+                    except Exception as exc:
+                        st.session_state.provider_error = (
+                            f"{connection.provider.label}: {explain_llm_error(exc)}")
+                st.rerun()
 
-        # FIX B: Proper state display with normalized flags
-        if st.session_state.token_error and not st.session_state.token_validated:
-            st.error(st.session_state.get('token_error_detail') or "❌ Invalid API key")
-        elif st.session_state.token_validated and not st.session_state.token_error:
-            n_models = len(st.session_state.get('available_models') or [])
-            st.success(f"✅ Connected to Groq ({n_models} models)")
-        else:
-            st.info("🔑 Enter API key and click Validate")
 
-        # Backend pathway API status. Core generation does not need it, but
-        # DAM expansion, gene addition and the debate system do.
-        backend_up = backend_health()
-        if backend_up:
-            st.success("✅ Pathway API: online")
+def render_sidebar():
+    with st.sidebar:
+        st.markdown("### Configuration")
+        render_provider_panel()
+
+        connections = st.session_state.connections
+        if st.session_state.provider_error:
+            st.error(st.session_state.provider_error)
+        if connections:
+            total = len(available_models())
+            names = ", ".join(c.provider.label for c in connections.values())
+            st.success(f"Connected: {names} ({total} models)")
+        elif not st.session_state.provider_error:
+            st.info("Connect an LLM provider to begin. Keys stay in this browser session "
+                    "and are never written to exports.")
+
+        if backend_health():
+            st.success("Pathway API: online")
         else:
-            st.warning(
-                "⚠️ **Pathway API: asleep or offline**\n\n"
-                + WAKE_BACKEND_HINT
-                + "\n\nCore signature generation works without it. DAM expansion, "
-                "gene addition and the debate system are paused until it is back."
-            )
-            if st.button("↻ Retry backend"):
+            st.warning("**Pathway API: asleep or offline**\n\n" + WAKE_BACKEND_HINT +
+                       "\n\nSignature generation works without it. Network expansion is paused "
+                       "and the debate runs without database evidence.")
+            if st.button("Retry backend"):
                 backend_health.clear()
                 st.rerun()
 
         st.markdown("---")
+        st.info("**Mode:** " + ("Publication" if st.session_state.generation_mode == 'publication'
+                                else "Exploratory"))
 
-        # NEW: Mode indicator
-        mode = st.session_state.get('generation_mode', 'exploratory')
-        if mode == 'publication':
-            st.info("📄 **Mode:** Publication")
-        else:
-            st.info("🔍 **Mode:** Exploratory")
-        
-        # NEW: Debate system status
-        if DEBATE_SYSTEM_AVAILABLE:
-            st.success("✅ Debate System: Available")
-        else:
-            st.warning("⚠️ Debate System: Not Available")
-
-        st.markdown("---")
-
-        # API Logging Toggle
-        with st.expander("⚙️ Advanced Settings"):
-            api_logging = st.checkbox(
-                "Enable detailed API logging",
-                value=True,
-                help="Show detailed progress in Layers 2-3 (semantic search & DAM expansion)",
-                key="enable_api_logging"
-            )
-            st.session_state['api_logging_enabled'] = api_logging
-
-        st.markdown("---")
-        
-        # Timing diagnostics
         if st.session_state.layer_timings:
-            st.markdown("### ⏱️ Performance")
-            
-            for timing in st.session_state.layer_timings:
-                if timing.end_time:
-                    st.caption(f"{timing.layer_name}: {timing.duration_str}")
-            
-            total = sum(t.duration for t in st.session_state.layer_timings if t.end_time)
-            if total > 0:
-                st.markdown(f"**Total: {total/60:.1f}m**")
-        
-        st.markdown("---")
-
-        # Cache Statistics Section
-        with st.expander("📊 Search Cache Stats", expanded=False):
-            try:
-                cache_client = SearchCacheClient()
-                stats = cache_client.get_stats()
-
-                if stats and stats.get('total_entries', 0) > 0:
-                    col1, col2 = st.columns(2)
-
-                    with col1:
-                        st.metric(
-                            "Cached Searches",
-                            stats.get('total_entries', 0),
-                            help="Total number of unique searches cached"
-                        )
-
-                    with col2:
-                        st.metric(
-                            "Total Hits",
-                            stats.get('total_hits', 0),
-                            help="Number of times cache was reused"
-                        )
-
-                    # Average hits per entry
-                    total_entries = stats.get('total_entries', 0)
-                    total_hits = stats.get('total_hits', 0)
-                    if total_entries > 0:
-                        avg_hits = total_hits / total_entries
-                        st.caption(f"📈 Average reuse: {avg_hits:.1f}x per query")
-
-                    # KB versions breakdown
-                    if stats.get('kb_versions'):
-                        st.markdown("**Knowledge Base Versions:**")
-                        for version, count in stats['kb_versions'].items():
-                            st.caption(f"• v{version}: {count} cached queries")
-
-                    # Cache efficiency indicator
-                    if total_hits > 0:
-                        st.success("✅ Cache is active and saving compute time!")
-                    else:
-                        st.info("💡 Cache is building - run queries to populate it")
-                else:
-                    st.info("🆕 Cache is empty. Run some signature generations to populate it!")
-
-            except Exception as e:
-                st.caption(f"⚠️ Cache unavailable: {str(e)[:60]}")
-                st.caption("💡 Cache server might be sleeping - it will wake up on first use")
+            st.markdown("### Timings")
+            for name, duration in st.session_state.layer_timings.items():
+                st.caption(f"{name}: {duration}")
 
         st.markdown("---")
-        st.markdown("### ℹ️ Pipeline")
-        st.caption("""
-        **Layers:**
-
-        1. 🧠 Granularity + Selection
-        2. 🔍 Semantic (ALL queries)
-        3. 🔬 DAM (Remote API)
-        4. ✅ Verification (Batch OR Debate)
-        5. 👤 Approval (Text-based)
-        """)
+        st.caption(
+            f"Pipeline {PIPELINE_VERSION} · engine {ENGINE_VERSION} · debate {DEBATE_VERSION}\n\n"
+            "1. Mechanisms (LLM + NCBI aliases)\n2. Hybrid retrieval (local)\n"
+            "3. Network expansion (API)\n4. Review or debate (LLM + API)\n5. Approve & export"
+        )
 
 
 # ============================================================
-# KB TAB
+# KNOWLEDGE BASE TAB
 # ============================================================
 
-def render_kb_tab():
-    st.markdown("## 📚 Knowledge Base")
-    
-    pathways = load_knowledge_base_cached()
-    
-    if pathways:
-        st.session_state.kb_loaded = True
-        st.success(f"✅ Loaded {len(pathways):,} pathways")
-        
-        sample_pid = list(pathways.keys())[0]
-        sample_genes = pathways[sample_pid]
-        
-        with st.expander("Example signature"):
-            st.caption(f"**{sample_pid}**")
-            st.caption(f"Genes: {', '.join(sample_genes[:10])}... ({len(sample_genes)} total)")
-    else:
-        st.error("Knowledge base not found")
+def render_kb_tab(resources: Optional[Dict]):
+    st.markdown("## Knowledge base")
+    if not resources:
+        st.error(f"Knowledge base not found. `{KB_PATH}` and `{EMBEDDINGS_PATH}` are required.")
+        return
+
+    index: KnowledgeIndex = resources['index']
+    meta = resources['kb_metadata']
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Gene sets", f"{index.n_pathways:,}")
+    col2.metric("Genes", f"{index.n_genes:,}")
+    col3.metric("Version", meta.get('version', 'unknown'))
+
+    if meta.get('sources'):
+        st.caption("Sources: " + ", ".join(f"{k} ({v:,})" for k, v in meta['sources'].items()))
+    st.caption(f"Embedding model: {resources['embedding_model']} · "
+               f"KB sha256 {str(resources['kb_sha256'])[:12]}… · "
+               f"embeddings sha256 {str(resources['embeddings_sha256'])[:12]}…")
+
+    with st.expander("Example gene set"):
+        sample = index.ids[0]
+        genes = index.pathways[sample]
+        st.caption(f"**{sample}** - {len(genes)} genes: {', '.join(genes[:12])}…")
 
 
 # ============================================================
 # GENERATION TAB
 # ============================================================
 
-def render_generation_tab():
-    st.markdown("## 🧬 Multi-Layer Signature Generation")
-    
-    if not st.session_state.kb_loaded:
-        st.warning("⚠️ Please load knowledge base first")
-        return
-    
-    if not st.session_state.token_validated:
-        st.warning("⚠️ Please validate Groq API key in the sidebar")
-        return
-    
-    # ============================================================
-    # MODE SELECTION
-    # ============================================================
-    st.markdown("### 🎚️ Generation Mode")
-    
+def render_mode_and_context() -> bool:
+    """Mode toggle and biological context. Returns False if required input is missing."""
+    st.markdown("### Generation mode")
     col1, col2 = st.columns(2)
-    
-    with col1:
-        if st.button(
-            "🔍 Exploratory Mode",
-            type="primary" if st.session_state.get('generation_mode', 'exploratory') == 'exploratory' else "secondary",
-            width="stretch",
-            key="btn_exploratory"
-        ):
-            st.session_state['generation_mode'] = 'exploratory'
-            st.rerun()
-    
-    with col2:
-        if st.button(
-            "📄 Publication Mode",
-            type="primary" if st.session_state.get('generation_mode', 'exploratory') == 'publication' else "secondary",
-            width="stretch",
-            key="btn_publication"
-        ):
-            st.session_state['generation_mode'] = 'publication'
-            st.rerun()
-    
-    # Show mode description
-    mode = st.session_state.get('generation_mode', 'exploratory')
-    
-    if mode == 'publication':
-        st.markdown("""
-        <div style='background: linear-gradient(135deg, rgba(33, 150, 243, 0.1), rgba(21, 101, 192, 0.1)); 
-                    padding: 1.2rem; border-radius: 12px; margin: 1rem 0; 
-                    border-left: 4px solid #2196F3;'>
-        📄 <strong style='font-size: 1.1em;'>Publication Mode Active</strong><br><br>
-        ✅ Requires biological context (species, tissue, disease)<br>
-        ✅ Removes housekeeping genes automatically<br>
-        ✅ Includes validation metadata in exports<br>
-        ⚠️ Results are tagged for reproducibility
-        </div>
-        """, unsafe_allow_html=True)
+    current = st.session_state.generation_mode
+    if col1.button("Exploratory", width="stretch",
+                   type="primary" if current == 'exploratory' else "secondary"):
+        st.session_state.generation_mode = 'exploratory'
+        st.rerun()
+    if col2.button("Publication", width="stretch",
+                   type="primary" if current == 'publication' else "secondary"):
+        st.session_state.generation_mode = 'publication'
+        st.rerun()
+
+    publication = st.session_state.generation_mode == 'publication'
+    if publication:
+        st.info("**Publication mode** - biological context is required, housekeeping genes are "
+                "removed, and LLM review applies a strict evidence standard.")
     else:
-        st.markdown("""
-        <div style='background: linear-gradient(135deg, rgba(76, 175, 80, 0.1), rgba(56, 142, 60, 0.1)); 
-                    padding: 1.2rem; border-radius: 12px; margin: 1rem 0; 
-                    border-left: 4px solid #4CAF50;'>
-        🔍 <strong style='font-size: 1.1em;'>Exploratory Mode Active</strong><br><br>
-        ⚡ Fast hypothesis generation<br>
-        ⚡ Minimal validation (quick iteration)<br>
-        ⚠️ <strong>Results NOT suitable for publication</strong>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    st.markdown("---")
-    
-    # ============================================================
-    # BIOLOGICAL CONTEXT
-    # ============================================================
-    
-    if mode == 'publication':
-        st.markdown("### 📋 Biological Context (Required)")
-        st.caption("This information ensures reproducibility and biological validity")
-        
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            species = st.selectbox(
-                "Species*",
-                ["Homo sapiens", "Mus musculus"],
-                index=0,
-                key="species_select"
-            )
-        
-        with col2:
-            tissue_type = st.selectbox(
-                "Primary Tissue*",
-                [
-                    "Blood/PBMC",
-                    "Adipose Tissue",
-                    "Liver",
-                    "Brain",
-                    "Lung",
-                    "Intestine",
-                    "Pancreas",
-                    "Kidney",
-                    "Heart",
-                    "Muscle",
-                    "Skin",
-                    "Custom"
-                ],
-                index=0,
-                key="tissue_select"
-            )
-            
-            if tissue_type == "Custom":
-                tissue_type = st.text_input(
-                    "Specify tissue",
-                    placeholder="e.g., Kidney cortex",
-                    key="custom_tissue"
-                )
-        
-        with col3:
-            disease_context = st.text_input(
-                "Disease/Condition*",
-                placeholder="e.g., obesity, type 2 diabetes",
-                key="disease_input"
-            )
-        
-        # Optional fields
-        with st.expander("➕ Additional Context (Optional but Recommended)"):
-            col_a, col_b = st.columns(2)
-            
-            with col_a:
-                cell_type = st.text_input(
-                    "Cell Type",
-                    placeholder="e.g., CD4+ T cells, adipocytes",
-                    key="cell_type_input"
-                )
-            
-            with col_b:
-                treatment = st.text_input(
-                    "Treatment/Condition",
-                    placeholder="e.g., LPS-stimulated, untreated",
-                    key="treatment_input"
-                )
-        
-        # Validation
-        if not disease_context or not disease_context.strip():
-            st.error("⚠️ Disease/Condition is required for Publication Mode")
-            st.info("💡 Switch to Exploratory Mode if you want to skip this")
-            return
-        
-        # Store context
-        st.session_state['bio_context'] = {
-            'species': species,
-            'tissue': tissue_type,
-            'disease': disease_context.strip(),
-            'cell_type': cell_type.strip() if cell_type else None,
-            'treatment': treatment.strip() if treatment else None,
-            'timestamp': datetime.now().isoformat()
-        }
-        
-        st.markdown("---")
-    
-    else:
-        # Exploratory mode - context optional
-        st.markdown("### 📋 Biological Context (Optional)")
-        
-        with st.expander("⚙️ Add Context (Recommended for Better Results)"):
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                species = st.selectbox("Species", ["Homo sapiens", "Mus musculus"], key="species_exp")
-                tissue_type = st.text_input("Tissue", placeholder="e.g., Blood", key="tissue_exp")
-            
-            with col2:
-                disease_context = st.text_input("Disease", placeholder="e.g., obesity", key="disease_exp")
-                cell_type = st.text_input("Cell Type", placeholder="e.g., T cells", key="cell_exp")
-            
-            if disease_context and disease_context.strip():
-                st.session_state['bio_context'] = {
-                    'species': species,
-                    'tissue': tissue_type or 'unspecified',
-                    'disease': disease_context.strip(),
-                    'cell_type': cell_type.strip() if cell_type else None,
-                    'treatment': None,
-                    'timestamp': datetime.now().isoformat()
-                }
-            else:
-                st.session_state['bio_context'] = None
-        
-        st.markdown("---")
-    
-    # Query input
-    st.markdown("### Research Question")
-    query = st.text_area(
-        "Biological question or mechanism",
-        key="main_query",
-        height=80,
-        placeholder="Example: Th17 role in obesity"
-    )
-    
-    # Parameters
+        st.info("**Exploratory mode** - context is optional and housekeeping genes are flagged "
+                "but kept. Treat output as hypotheses.")
+
+    st.markdown("### Biological context" + (" (required)" if publication else " (optional)"))
+    tissues = ["", "Blood/PBMC", "Adipose Tissue", "Liver", "Brain", "Lung", "Intestine",
+               "Pancreas", "Kidney", "Heart", "Muscle", "Skin", "Spleen", "Breast", "Other"]
     col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        target_count = st.number_input("Total Signatures", 5, 100, 35, 5)
-    
-    with col2:
-        min_genes = st.number_input("Min Genes", 5, 30, 10)
-    
-    with col3:
-        max_genes = st.number_input("Max Genes", 10, 50, 20)
-    
-    if min_genes >= max_genes:
-        st.error("Min genes must be < max genes")
+    species = col1.selectbox("Species", ["Homo sapiens", "Mus musculus"], key="ctx_species")
+    tissue = col2.selectbox("Tissue", tissues, key="ctx_tissue",
+                            help="Matched to GTEx v10 for the expression evidence in the debate.")
+    if tissue == "Other":
+        tissue = col2.text_input("Specify tissue", key="ctx_tissue_other")
+    disease = col3.text_input("Disease / condition", key="ctx_disease",
+                              placeholder="e.g. melanoma")
+    col1, col2 = st.columns(2)
+    cell_type = col1.text_input("Cell type", key="ctx_cell", placeholder="e.g. CD8+ T cells")
+    treatment = col2.text_input("Treatment", key="ctx_treatment", placeholder="e.g. anti-PD-1")
+
+    if species == "Mus musculus":
+        st.caption("The knowledge base holds human gene symbols; mouse context is passed to the "
+                   "LLMs but genes are reported as human orthologue symbols.")
+
+    context = {
+        'species': species, 'tissue': (tissue or '').strip() or None,
+        'disease': disease.strip() or None, 'cell_type': cell_type.strip() or None,
+        'treatment': treatment.strip() or None,
+    }
+    has_context = any(context[k] for k in ('tissue', 'disease', 'cell_type', 'treatment'))
+    st.session_state.bio_context = context if has_context else None
+
+    if publication and not (context['tissue'] and context['disease']):
+        st.error("Publication mode needs at least a tissue and a disease/condition.")
+        return False
+    return True
+
+
+def render_generation_tab(resources: Optional[Dict]):
+    st.markdown("## Signature generation")
+    if not resources:
+        st.error("Knowledge base not loaded - see the Knowledge base tab.")
         return
-    
+    if not available_models():
+        st.warning("Connect an LLM provider in the sidebar to begin.")
+        return
+
+    if not render_mode_and_context():
+        return
+
     st.markdown("---")
-    
-    # LAYERS
-    render_layer1_granularity(query, target_count, min_genes, max_genes)
-    
+    st.markdown("### Research question")
+    query = st.text_area("Biological question or mechanism", key="main_query", height=80,
+                         placeholder="e.g. T cell exhaustion in the tumor microenvironment")
+
+    render_layer1(query, resources)
     if not st.session_state.granularity_approved:
         return
-    
-    render_layer2_semantic_fixed(query, target_count, min_genes, max_genes)
-    
-    if not st.session_state.signature_ids:
+    render_layer2(resources)
+    if not st.session_state.signatures:
         return
-    
-    render_layer3_dam_remote()
-    
-    render_layer4_verification_with_debate(query)  # NEW: Enhanced with debate
-    
-    render_layer5_approval_text_based()
+    render_layer3()
+    render_layer4(resources)
+    render_layer5()
+    render_export(resources)
 
 
 # ============================================================
-# LAYER 1
+# LAYER 1 - MECHANISMS
 # ============================================================
 
-def render_layer1_granularity(query, target_count, min_genes, max_genes):
-    """Layer 1: Granularity control + mechanism selection"""
-    
-    st.markdown("### 🧠 Layer 1: Granularity & Selection")
-    
-    st.markdown("""
-    <div class="info-box">
-    Control how many mechanisms LLM generates, then SELECT which ones to use.
-    </div>
-    """, unsafe_allow_html=True)
-    
-    granularity_level = st.slider(
-        "Number of mechanisms:",
-        min_value=3,
-        max_value=60,
-        value=10,
-        step=1
-    )
-    
-    st.caption(f"💡 Will generate {granularity_level} mechanisms")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        if st.button("🎯 Generate Mechanisms", type="primary", width="stretch"):
-            if not query or not query.strip():
-                st.error("Please enter a query")
-                return
-            
-            timing = LayerTiming("Layer 1: Decomposition", time.time())
-            
-            with st.spinner(f"🧠 LLM generating {granularity_level} mechanisms..."):
-                result = decompose_with_granularity(
-                    query,
-                    granularity_level,
-                    st.session_state.groq_api_key
-                )
-                
-                if result and result.facets:
-                    timing.end_time = time.time()
-                    st.session_state.layer_timings = [timing]
-                    
-                    st.session_state.decomposition_result = result
-                    st.session_state.granularity_approved = False
-                    st.session_state.selected_mechanism_ids = []
-                    
-                    st.success(f"✅ Generated {len(result.facets)} mechanisms!")
-                    st.markdown(f'<span class="timing-badge">⏱️ {timing.duration_str}</span>', unsafe_allow_html=True)
-                    time.sleep(0.5)
-                    st.rerun()
-    
-    with col2:
-        if st.session_state.decomposition_result:
-            if st.button("🔄 Regenerate", width="stretch"):
-                st.session_state.decomposition_result = None
-                st.session_state.granularity_approved = False
-                st.rerun()
-    
-    # Show mechanisms with checkboxes
-    if st.session_state.decomposition_result:
-        st.markdown("---")
-        st.markdown("#### 📋 Select Mechanisms to Use:")
-        
-        result = st.session_state.decomposition_result
-        
-        # Initialize selection (all selected by default)
-        if not st.session_state.selected_mechanism_ids:
-            st.session_state.selected_mechanism_ids = [f['facet_id'] for f in result.facets]
-        
-        # Render checkboxes
-        for i, facet in enumerate(result.facets, 1):
-            col1, col2 = st.columns([1, 20])
-            
-            with col1:
-                is_selected = facet['facet_id'] in st.session_state.selected_mechanism_ids
-                
-                if st.checkbox(
-                    f"select_{facet['facet_id']}",
-                    key=f"checkbox_{facet['facet_id']}",
-                    value=is_selected,
-                    label_visibility="collapsed"
-                ):
-                    if facet['facet_id'] not in st.session_state.selected_mechanism_ids:
-                        st.session_state.selected_mechanism_ids.append(facet['facet_id'])
-                else:
-                    if facet['facet_id'] in st.session_state.selected_mechanism_ids:
-                        st.session_state.selected_mechanism_ids.remove(facet['facet_id'])
-            
-            with col2:
-                with st.expander(f"{i}. {facet['facet_name']}", expanded=False):
-                    st.caption(f"**Query:** {', '.join(facet.get('mechanism_queries', []))}")
-                    st.caption(f"**ID:** {facet['facet_id']}")
-        
-        # Selection counter
-        selected_count = len(st.session_state.selected_mechanism_ids)
-        total_count = len(result.facets)
-        
-        st.markdown(f"""
-        <div class="info-box">
-        📊 <strong>Selected: {selected_count} of {total_count} mechanisms</strong>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        # Approve button
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            if st.button("✅ Approve Selected & Continue", type="primary", width="stretch"):
-                if selected_count == 0:
-                    st.error("Please select at least 1 mechanism")
-                else:
-                    st.session_state.granularity_approved = True
-                    st.session_state['target_count'] = target_count
-                    st.success(f"✅ Approved {selected_count} mechanisms!")
-                    time.sleep(0.5)
-                    st.rerun()
-        
-        with col2:
-            if st.button("❌ Reject All", width="stretch"):
-                st.session_state.decomposition_result = None
-                st.session_state.granularity_approved = False
-                st.rerun()
-
-
-# ============================================================
-# LAYER 2 - FIXED VERSION
-# ============================================================
-
-def render_layer2_semantic_fixed(query, target_count, min_genes, max_genes):
-    """
-    FIX ROOT CAUSE #1 & #2: 
-    - Use ALL mechanism queries (removed [:1])
-    - Dynamic variant allocation
-    - Signature deduplication
-    """
-    
+def render_layer1(query: str, resources: Dict):
     st.markdown("---")
-    st.markdown("### 🔍 Layer 2: Semantic Building (FIXED)")
-    
-    st.markdown(f"""
-    <div class="info-box">
-    ✅ <strong>FIXED:</strong> Uses ALL {len(st.session_state.selected_mechanism_ids)} mechanism queries for true diversity!
-    </div>
-    """, unsafe_allow_html=True)
-    
-    if st.button("🚀 Build Semantic Signatures", type="primary", width="stretch"):
-        
-        timing = LayerTiming("Layer 2: Semantic Building", time.time())
+    st.markdown("### Layer 1 - Mechanisms")
+    st.caption("The LLM proposes distinct mechanisms, each with a plain-language description "
+               "and seed genes. The knowledge base, not the LLM, decides the final genes.")
 
-        progress_bar = st.progress(0)
-        status = st.empty()
+    n_mechanisms = st.slider("Number of mechanisms", 3, MAX_MECHANISMS, 10)
+    resolve_aliases = st.checkbox(
+        "Resolve gene aliases with NCBI Gene", value=True,
+        help="Seed genes named by an alias (GLUT1, PD-L1, 4-1BB) are mapped to official "
+             "symbols through NCBI's public API. Ambiguous names are reported, not guessed.")
+    col1, col2 = st.columns(2)
 
-        # Add collapsible detailed progress
-        if st.session_state.get('api_logging_enabled', True):
-            with st.expander("🔍 Detailed Progress", expanded=True):
-                detail_container = st.container()
+    if col1.button("Generate mechanisms", type="primary", width="stretch"):
+        if not query or not query.strip():
+            st.error("Enter a research question first.")
         else:
-            detail_container = None
+            model = reasoning_model()
+            started = time.time()
+            facets, result = None, None
+            with st.spinner(f"{describe_model(model)} is proposing {n_mechanisms} mechanisms..."):
+                try:
+                    facets, result = decompose_query(
+                        get_router(), model, query, n_mechanisms,
+                        context=st.session_state.bio_context,
+                        fallbacks=fallbacks_for(model), index=resources['index'])
+                except Exception as exc:
+                    st.error(explain_llm_error(exc, model))
+            if facets:
+                aliases = {'enabled': resolve_aliases}
+                if resolve_aliases:
+                    try:
+                        aliases.update(resolve_seed_aliases(facets, resources['index'], NCBIGene().lookup))
+                    except Exception as exc:
+                        aliases['error'] = f"NCBI unavailable, aliases not resolved: {str(exc)[:160]}"
+                reset_from(1)
+                st.session_state.facets = facets
+                st.session_state.selected_facet_ids = [f['facet_id'] for f in facets]
+                st.session_state.query_used = query.strip()
+                st.session_state.l1_provenance = {
+                    'requested': n_mechanisms, 'returned': len(facets),
+                    'alias_resolution': aliases, **result.provenance()}
+                record_timing("Layer 1: mechanisms", started)
+                st.rerun()
+
+    if st.session_state.facets and col2.button("Discard mechanisms", width="stretch"):
+        reset_from(1)
+        st.rerun()
+
+    facets = st.session_state.facets
+    if not facets:
+        return
+
+    provenance = st.session_state.l1_provenance or {}
+    st.caption(f"Model: `{provenance.get('model')}` · {provenance.get('returned')} of "
+               f"{provenance.get('requested')} mechanisms")
+    for note in provenance.get('notes', []):
+        st.warning(note)
+    aliases = provenance.get('alias_resolution') or {}
+    if aliases.get('error'):
+        st.warning(aliases['error'])
+    elif aliases.get('looked_up'):
+        st.caption(f"NCBI Gene: {aliases['resolved']} alias(es) resolved, "
+                   f"{aliases['ambiguous']} ambiguous, {aliases['unresolved']} not found.")
+
+    selected = []
+    for facet in facets:
+        col1, col2 = st.columns([1, 24])
+        keep = col1.checkbox("use", value=facet['facet_id'] in st.session_state.selected_facet_ids,
+                             key=f"use_{facet['facet_id']}_{st.session_state.run_id}",
+                             label_visibility="collapsed")
+        if keep:
+            selected.append(facet['facet_id'])
+        with col2.expander(f"{facet['facet_id']}. {facet['facet_name']}"):
+            st.write(facet['description'] or "_No description returned._")
+            st.caption("Seed genes: " + (", ".join(facet['seed_genes']) or "none recognised"))
+            if facet.get('seeds_resolved'):
+                st.caption("Aliases resolved (NCBI Gene): " + ", ".join(
+                    f"{name} → {info['symbol']}" for name, info in facet['seeds_resolved'].items()))
+            if facet.get('seeds_ambiguous'):
+                st.caption("Ambiguous names, not used: " + "; ".join(
+                    f"{name} ({' / '.join(candidates[:4])})"
+                    for name, candidates in facet['seeds_ambiguous'].items()))
+            if facet.get('seeds_unknown'):
+                st.caption("Not recognised, ignored: " + ", ".join(facet['seeds_unknown']))
+    st.session_state.selected_facet_ids = selected
+
+    st.caption(f"Selected {len(selected)} of {len(facets)} mechanisms")
+    if st.session_state.granularity_approved:
+        st.success("Mechanisms approved")
+    elif st.button("Approve selected & continue", type="primary", width="stretch"):
+        if not selected:
+            st.error("Select at least one mechanism.")
+        else:
+            st.session_state.granularity_approved = True
+            st.rerun()
+
+
+# ============================================================
+# LAYER 2 - HYBRID RETRIEVAL
+# ============================================================
+
+def render_layer2(resources: Dict):
+    st.markdown("---")
+    st.markdown("### Layer 2 - Evidence-grounded signatures")
+    st.caption("Gene sets statistically enriched for the seed genes are taken first, re-ranked "
+               "by semantic similarity to the description; genes are scored by weighted support "
+               "across the retrieved sets. Runs locally and is fully deterministic.")
+
+    defaults = RetrievalParams()
+    col1, col2, col3 = st.columns(3)
+    variants = col1.number_input("Signatures per mechanism", 1, 4, 1,
+                                 help="1 = one core signature. More adds sub-modules: clusters "
+                                      "of overlapping gene sets within the mechanism.")
+    min_genes = col2.number_input("Min genes", 5, 30, defaults.min_genes)
+    max_genes = col3.number_input("Max genes", 10, 50, defaults.max_genes)
+    if min_genes > max_genes:
+        st.error("Min genes must not exceed max genes.")
+        return
+
+    with st.expander("Retrieval settings"):
+        col1, col2 = st.columns(2)
+        top_k = col1.slider("Gene sets kept per mechanism", 5, 40, defaults.top_k, 1,
+                            help="Fewer, more relevant gene sets gave the best held-out recovery.")
+        fdr = col2.select_slider("Enrichment FDR threshold", [0.001, 0.01, 0.05, 0.1],
+                                 value=defaults.fdr_threshold)
+        min_support = col1.slider("Min supporting gene sets per gene", 1, 5, defaults.min_support)
+        dedup = col2.slider("Max Jaccard overlap between signatures", 0.1, 0.9,
+                            defaults.dedup_jaccard, 0.05,
+                            help="A signature more similar than this to an earlier one is dropped.")
+
+    if st.button("Build signatures", type="primary", width="stretch"):
+        index: KnowledgeIndex = resources['index']
+        params = RetrievalParams(
+            top_k=top_k, fdr_threshold=float(fdr), min_support=min_support,
+            min_genes=int(min_genes), max_genes=int(max_genes), dedup_jaccard=dedup,
+            drop_housekeeping=st.session_state.generation_mode == 'publication')
 
         try:
-            # Load KB
-            status.info("📚 Loading KB...")
-            progress_bar.progress(5)
-            
-            pathways_dict = load_knowledge_base_cached()
-            if not pathways_dict:
-                st.error("Cannot load KB")
-                return
-            
-            # Load model
-            status.info("🔍 Loading model...")
-            progress_bar.progress(10)
-            
-            embedding_model = load_embedding_model()
-            if not embedding_model:
-                st.error("Cannot load model")
-                return
-            
-            # Load embeddings
-            status.info("📂 Loading precomputed pathway embeddings...")
-            progress_bar.progress(15)
-            
-            pathway_embeddings = load_precomputed_embeddings_or_fail(
-                "data/pathway_embeddings.pkl"
-            )
-            
-            status.success(f"✅ Loaded {len(pathway_embeddings):,} pathway embeddings")
+            encode = sentence_encoder(load_embedding_model())
+        except Exception as exc:
+            st.warning(f"Embedding model unavailable ({exc}). Using seed enrichment only.")
+            encode = None
 
-            # Initialize cache client
-            status.info("🔌 Connecting to cache server...")
-            cache_client = SearchCacheClient(
-                api_url=MSIGDB_API_URL
-            )
+        started = time.time()
+        facets = [f for f in st.session_state.facets
+                  if f['facet_id'] in st.session_state.selected_facet_ids]
+        progress = st.progress(0.0)
+        kept, info = build_signatures(index, facets, encode, params, n_variants=int(variants),
+                                      progress=lambda done, total: progress.progress(done / total))
+        progress.empty()
 
-            # Track cache statistics
-            total_searches = 0
-            cache_hits = 0
+        reset_from(2)
+        st.session_state.signatures = {s.signature_id: s for s in kept}
+        st.session_state.retrieval_params = info
+        record_timing("Layer 2: retrieval", started)
+        st.rerun()
 
-            status.success("✅ Cache client ready")
-
-            progress_bar.progress(40)
-            status.info("🧬 Building signatures with TRUE diversity...")
-            
-            # Get selected facets
-            all_facets = st.session_state.decomposition_result.facets
-            selected_facets = [
-                f for f in all_facets 
-                if f['facet_id'] in st.session_state.selected_mechanism_ids
-            ]
-            
-            # Calculate variants per mechanism
-            num_mechanisms = len(selected_facets)
-            variants_per_mechanism = max(1, target_count // num_mechanisms)
-            remainder = target_count % num_mechanisms
-            
-            status.info(
-                f"🎯 Target: {target_count} signatures from {num_mechanisms} mechanisms\n"
-                f"   → {variants_per_mechanism} variants per mechanism (+{remainder} for top mechanisms)"
-            )
-            
-            builder = SignatureBuilder(min_genes=min_genes, max_genes=max_genes)
-            all_signatures = []
-            
-            for i, facet in enumerate(selected_facets):
-                facet_name = facet['facet_name']
-                mechanism_queries = facet.get('mechanism_queries', [facet_name])
-
-                status.info(f"🔍 Processing mechanism {i+1}/{len(selected_facets)}: {facet_name}")
-
-                # Show details in expander
-                if detail_container:
-                    with detail_container:
-                        st.markdown(f"**📋 Mechanism {i+1}: {facet_name}**")
-
-                # FIX ROOT CAUSE #1: Use ALL queries, not just [:1]
-                # Aggregate pathways from ALL queries first (Fix for Diversity Loss)
-                facet_pathways_dict = {}
-                facet_similarities = {}
-
-                for query_idx, mech_query in enumerate(mechanism_queries):
-                    status.info(f"   🔍 Searching: {facet_name} (Query {query_idx+1}/{len(mechanism_queries)})")
-
-                    # Show query details in expander
-                    if detail_container:
-                        with detail_container:
-                            query_display = mech_query[:70] + "..." if len(mech_query) > 70 else mech_query
-                            st.caption(f"   🔎 Query {query_idx+1}/{len(mechanism_queries)}: '{query_display}'")
-                            st.caption(f"   🧮 Encoding to 384-dim vector and comparing against {len(pathway_embeddings):,} pathways...")
-
-                    # Use cache-aware search
-                    rp, ps, was_cached = cache_client.search_with_cache(
-                        query=mech_query,
-                        facet_name=facet_name,
-                        mechanism_name=mech_query,
-                        embedding_model=embedding_model,
-                        pathway_embeddings=pathway_embeddings,
-                        pathways_dict=pathways_dict,
-                        top_k=50
-                    )
-
-                    # Track cache performance
-                    total_searches += 1
-                    if was_cached:
-                        cache_hits += 1
-
-                    # Show results in expander
-                    if detail_container:
-                        with detail_container:
-                            if was_cached:
-                                st.caption(f"   ✅ **Cache HIT** - Retrieved {len(rp)} pathways instantly")
-                            else:
-                                if rp:
-                                    top_pathway = list(rp.keys())[0]
-                                    top_score = ps[top_pathway]
-                                    top_pathway_display = top_pathway[:50] + "..." if len(top_pathway) > 50 else top_pathway
-                                    st.caption(f"   ✅ Found {len(rp)} pathways | Top: {top_pathway_display} (score: {top_score:.3f})")
-                                    st.caption(f"   💾 Cached for future queries")
-
-                    if rp:
-                        facet_pathways_dict.update(rp)
-                        for pid, score in ps.items():
-                            facet_similarities[pid] = max(facet_similarities.get(pid, 0.0), score)
-
-                if facet_pathways_dict:
-                    # Fix variants calculation
-                    num_variants = variants_per_mechanism
-                    if i < remainder:
-                        num_variants += 1
-
-                    # Show signature building details
-                    if detail_container:
-                        with detail_container:
-                            st.caption(f"   🧬 Building {num_variants} signature variants...")
-
-                    # Build diverse mechanisms from the aggregated pool
-                    mechanism_sigs = builder.build_multiple_mechanisms_dynamic(
-                        facet_name,
-                        facet_pathways_dict,
-                        facet_similarities,
-                        num_variants=num_variants
-                    )
-
-                    # Show created signatures
-                    if detail_container and mechanism_sigs:
-                        with detail_container:
-                            st.caption(f"   ✅ Created {len(mechanism_sigs)} signatures:")
-                            for sig in mechanism_sigs:
-                                st.caption(f"      • {sig.signature_name} ({len(sig.genes)} genes)")
-
-                    all_signatures.extend(mechanism_sigs)
-
-                # Add separator between mechanisms
-                if detail_container:
-                    with detail_container:
-                        st.markdown("---")
-
-                progress = 40 + int((i + 1) / len(selected_facets) * 50)
-                progress_bar.progress(progress)
-
-            # Display cache performance
-            if total_searches > 0:
-                cache_hit_rate = (cache_hits / total_searches * 100)
-                if cache_hits > 0:
-                    st.success(f"📊 Cache Performance: {cache_hits}/{total_searches} hits ({cache_hit_rate:.1f}%)")
-                else:
-                    st.info(f"📊 Cache Performance: 0/{total_searches} hits (all new queries cached for future use)")
-
-            # Trim to exact target (should be close already)
-            if len(all_signatures) > target_count:
-                all_signatures.sort(key=lambda s: s.confidence, reverse=True)
-                all_signatures = all_signatures[:target_count]
-                status.info(f"   ✂️ Trimmed to exactly {target_count} signatures")
-            
-            timing.end_time = time.time()
-            st.session_state.layer_timings.append(timing)
-            
-            # Store signatures
-            st.session_state.signature_ids = [sig.signature_id for sig in all_signatures]
-            
-            if 'signature_cache' not in st.session_state:
-                st.session_state.signature_cache = {}
-            
-            for sig in all_signatures:
-                st.session_state.signature_cache[sig.signature_id] = sig
-            
-            status.success(f"✅ Built {len(all_signatures)} unique signatures!")
-            st.markdown(f'<span class="timing-badge">⏱️ {timing.duration_str}</span>', unsafe_allow_html=True)
-            progress_bar.progress(100)
-            
-            # Show diversity stats
-            facet_dist = Counter([sig.facet for sig in all_signatures])
-            st.info(f"📊 Facet distribution: {dict(facet_dist)}")
-            
-            time.sleep(1)
-            st.rerun()
-            
-        except Exception as e:
-            status.error(f"❌ Failed: {e}")
-            progress_bar.empty()
-            import traceback
-            st.code(traceback.format_exc())
-    
-    # Show results
-    if st.session_state.signature_ids:
-        signatures = [st.session_state.signature_cache[sid] for sid in st.session_state.signature_ids]
-        
-        st.markdown(f"""
-        <div class="success-box">
-        ✅ <strong>{len(signatures)} signatures built</strong>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        gene_counts = [len(sig.genes) for sig in signatures]
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.metric("Signatures", len(signatures))
-        with col2:
-            st.metric("Avg Genes", f"{np.mean(gene_counts):.1f}")
-        with col3:
-            st.metric("Range", f"{min(gene_counts)}-{max(gene_counts)}")
-
-
-# ============================================================
-# LAYER 3 - REMOTE API
-# ============================================================
-
-def render_layer3_dam_remote():
-    """Layer 3: DAM expansion with REMOTE API"""
-    
-    st.markdown("---")
-    st.markdown("### 🔬 Layer 3: DAM Expansion (Remote)")
-    
-    st.markdown("""
-    <div class="info-box">
-    ⚡ <strong>REMOTE MODE:</strong> Queries remote database - no local files needed!
-    </div>
-    """, unsafe_allow_html=True)
-    
-    enable_dam = st.checkbox("🔬 Enable DAM Expansion", value=False)
-    
-    if enable_dam:
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            expansion_strength = st.slider("Strength", 0.1, 1.0, 0.5, 0.1)
-        
-        with col2:
-            max_neighbors = st.slider("Max neighbors", 1, 10, 5, 1)
-        
-        # API URL
-        api_url = MSIGDB_API_URL
-
-        _backend_up = backend_health()
-        if not _backend_up:
-            st.warning(
-                "⚠️ **DAM expansion needs the pathway API, which is asleep "
-                "or offline.**\n\n"
-                + WAKE_BACKEND_HINT
-                + "\n\nYour signatures are unaffected - you can continue "
-                "without this step."
-            )
-
-        if st.button("🔬 Expand with DAM", type="primary", width="stretch",
-                     disabled=not _backend_up):
-            
-            timing = LayerTiming("Layer 3: DAM Expansion", time.time())
-            
-            try:
-                status = st.empty()
-                status.info("🌐 Connecting to remote database...")
-                
-                db_api = DatabaseClient(api_url=api_url)
-                status.success("✅ Connected!")
-                
-                signatures = [
-                    st.session_state.signature_cache[sid]
-                    for sid in st.session_state.signature_ids
-                ]
-
-                progress_bar = st.progress(0)
-                progress_text = st.empty()
-
-                # Add collapsible detailed logging
-                if st.session_state.get('api_logging_enabled', True):
-                    with st.expander("📡 API Call Details", expanded=True):
-                        api_log_container = st.container()
-                else:
-                    api_log_container = None
-
-                total = len(signatures)
-                expanded_count = 0
-
-                for i, sig in enumerate(signatures):
-                    progress_text.info(f"🔬 Expanding signature {i+1}/{total}: {sig.signature_name}")
-
-                    # Log API call details
-                    if api_log_container:
-                        with api_log_container:
-                            st.markdown(f"**Signature {i+1}/{total}: {sig.signature_name}**")
-                            st.caption(f"   📡 Endpoint: POST /api/expand-signature")
-                            st.caption(f"   📊 Parameters:")
-                            st.caption(f"      • Seed genes: {len(sig.genes)}")
-                            st.caption(f"      • Expansion strength: {expansion_strength:.2f}")
-                            st.caption(f"      • Max neighbors per gene: {max_neighbors}")
-                            st.caption(f"   ⏳ Querying gene_gene.db (2.1M connections)...")
-
-                    start_time = time.time()
-
-                    try:
-                        original_genes = set(sig.genes)
-                        expanded_genes = db_api.expand_signature_smart(
-                            seed_genes=sig.genes,
-                            strength=expansion_strength,
-                            max_pathways_per_gene=max_neighbors
-                        )
-
-                        elapsed = time.time() - start_time
-                        new_genes = set(expanded_genes) - original_genes
-
-                        # Show results in expander
-                        if api_log_container:
-                            with api_log_container:
-                                st.caption(f"   ✅ Response in {elapsed:.2f}s")
-                                st.caption(f"   📈 Results:")
-                                st.caption(f"      • Original: {len(original_genes)} genes")
-                                st.caption(f"      • Added: {len(new_genes)} genes")
-                                if new_genes:
-                                    new_genes_list = list(new_genes)[:5]
-                                    new_genes_str = ', '.join(new_genes_list)
-                                    if len(new_genes) > 5:
-                                        new_genes_str += '...'
-                                    st.caption(f"      • New genes: {new_genes_str}")
-                                st.caption(f"      • Final: {len(expanded_genes)} genes")
-
-                        sig.genes = list(expanded_genes)
-                        sig.dam_expanded = True
-                        st.session_state.signature_cache[sig.signature_id] = sig
-                        expanded_count += 1
-
-                    except Exception as e:
-                        if api_log_container:
-                            with api_log_container:
-                                st.caption(f"   ❌ API Error: {str(e)[:100]}")
-                        st.warning(f"⚠️ Failed to expand: {sig.signature_name}")
-
-                    # Add separator between signatures
-                    if api_log_container:
-                        with api_log_container:
-                            st.markdown("---")
-
-                    progress_bar.progress((i + 1) / total)
-                
-                timing.end_time = time.time()
-                st.session_state.layer_timings.append(timing)
-                st.session_state.dam_enabled = True
-                
-                progress_text.success(
-                    f"✅ Expanded {expanded_count}/{total} signatures!"
-                )
-                
-                time.sleep(1)
-                st.rerun()
-                
-            except Exception as e:
-                st.error(f"❌ Connection failed: {e}")
-        
-        if st.session_state.dam_enabled:
-            st.success("✅ DAM expansion complete")
-    else:
-        st.info("DAM disabled")
-
-
-# ============================================================
-# LAYER 4 - NEW: VERIFICATION WITH DEBATE SYSTEM
-# ============================================================
-
-def render_layer4_verification_with_debate(query):
-    """Layer 4: Enhanced verification with debate system option"""
-    
-    st.markdown("---")
-    st.markdown("### ✅ Layer 4: Verification")
-    
-    if not DEBATE_SYSTEM_AVAILABLE:
-        st.markdown("""
-        <div class="warning-box">
-        ⚠️ <strong>Debate System Not Available</strong><br>
-        Using standard batch verification only. To enable debate system, install:<br>
-        • db_client_enhanced.py<br>
-        • debate_system_with_injector.py<br>
-        • material_ui_builtin.py
-        </div>
-        """, unsafe_allow_html=True)
-        
-        # Fall back to standard verification
-        render_layer4_standard_verification(query)
+    signatures = ordered_signatures()
+    if not signatures:
         return
-    
 
-    
-    st.markdown("""
-    <div class="info-box">
-    🆕 <strong>Choose verification method:</strong> Traditional batch LLM or Multi-round AI Debate
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Method selection
+    info = st.session_state.retrieval_params or {}
+    overlap = overlap_summary(signatures)
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Signatures", len(signatures))
+    col2.metric("Mean support", f"{sum(s.support() for s in signatures) / len(signatures):.2f}",
+                help="Mean relevance-weighted fraction of retrieved gene sets containing each gene.")
+    col3.metric("Mean pairwise Jaccard", f"{overlap['mean_jaccard']:.3f}")
+    col4.metric("Max pairwise Jaccard", f"{overlap['max_jaccard']:.2f}")
+    if info.get('dropped_as_duplicates'):
+        st.caption(f"{info['dropped_as_duplicates']} signature(s) dropped as near-duplicates.")
+    if info.get('mechanisms_without_signature'):
+        st.warning("No signature could be built for: " + ", ".join(info['mechanisms_without_signature']))
+
+    st.dataframe(pd.DataFrame([{
+        'Signature': s.signature_name, 'Genes': len(s.genes), 'Support': round(s.support(), 3),
+        'Retrieval': s.retrieval_mode, 'Seeds kept': f"{s.current_seed_recovery():.0%}",
+        'Not LLM-proposed': f"{s.current_novel_fraction():.0%}",
+        'Top gene set': s.source_pathways[0]['pathway'] if s.source_pathways else '',
+    } for s in signatures]), hide_index=True, width="stretch")
+
+    with st.expander("Supporting gene sets per signature"):
+        # Names are unique (one per mechanism and sub-module), so they can be
+        # the options directly.
+        by_name = {s.signature_name: s for s in signatures}
+        sig = by_name[st.selectbox("Signature", list(by_name),
+                                   key=f"evidence_view_{st.session_state.run_id}")]
+        st.dataframe(pd.DataFrame(sig.source_pathways).drop(columns=['seeds_hit'], errors='ignore'),
+                     hide_index=True, width="stretch")
+        if sig.seeds_unsupported:
+            st.caption("LLM seeds the knowledge base did not support here (dropped): "
+                       + ", ".join(sig.seeds_unsupported))
+
+
+# ============================================================
+# LAYER 3 - NETWORK EXPANSION
+# ============================================================
+
+def render_layer3():
+    st.markdown("---")
+    st.markdown("### Layer 3 - Network expansion (optional)")
+    st.caption("Adds genes that are network neighbours of at least two signature genes, ranked "
+               "by summed link strength. Additions are appended after the retrieved genes and "
+               "tagged `network`.")
+
+    backend_up = backend_health()
+    if not backend_up:
+        st.warning("**Network expansion needs the pathway API.**\n\n" + WAKE_BACKEND_HINT)
+
     col1, col2 = st.columns(2)
-    
-    with col1:
-        if st.button(
-            "📋 Batch Verification",
-            type="primary" if st.session_state.get('verification_method') == 'batch' else "secondary",
-            width="stretch",
-            key="btn_batch_verify"
-        ):
-            st.session_state.verification_method = 'batch'
+    strength = col1.slider("Expansion strength", 0.0, 1.0, 0.5, 0.1,
+                           help="Higher = weaker links accepted = more candidates.")
+    max_additions = col2.slider("Max genes added per signature", 1, 10, 3)
+    col1.caption(f"Link weight cut-off: {strength_to_min_prob(strength):.3f} "
+                 "(each gene's 50 strongest links are stored, with weights of about 0.01-0.07)")
+
+    if st.button("Expand signatures", width="stretch", disabled=not backend_up):
+        db = get_db_client()
+        publication = st.session_state.generation_mode == 'publication'
+        started = time.time()
+        failures = []
+        progress = st.progress(0.0)
+        signatures = ordered_signatures()
+        for i, sig in enumerate(signatures):
+            try:
+                # Expand from the retrieved genes only, so re-running is idempotent.
+                candidates = db.network_expansion(retrieved_genes(sig), strength=strength,
+                                                  max_additions=max_additions,
+                                                  drop_housekeeping=publication)
+            except BackendUnavailable as exc:
+                failures.append(f"{sig.signature_name}: {exc}")
+                continue
+            apply_network_expansion(sig, candidates)
+            st.session_state.network_additions[sig.signature_id] = candidates
+            invalidate_approval(sig.signature_id)
+            progress.progress((i + 1) / len(signatures))
+        progress.empty()
+        st.session_state.expansion_settings = {
+            'strength': strength, 'min_link_probability': strength_to_min_prob(strength),
+            'max_additions': max_additions, 'min_supporting_signature_genes': 2}
+        record_timing("Layer 3: network expansion", started)
+        for failure in failures:
+            st.warning(failure)
+        if not failures:
             st.rerun()
-    
-    with col2:
-        if st.button(
-            "🗣️ Multi-Round Debate",
-            type="primary" if st.session_state.get('verification_method') == 'debate' else "secondary",
-            width="stretch",
-            key="btn_debate_verify"
-        ):
-            st.session_state.verification_method = 'debate'
-            st.rerun()
-    
-    method = st.session_state.get('verification_method', 'batch')
-    
-    if method == 'batch':
-        render_layer4_standard_verification(query)
+
+    additions = st.session_state.network_additions
+    if additions:
+        total = sum(len(v) for v in additions.values())
+        st.success(f"{total} genes added across {sum(1 for v in additions.values() if v)} signatures")
+        with st.expander("Added genes"):
+            for sid, candidates in additions.items():
+                if candidates and sid in st.session_state.signatures:
+                    st.caption(f"**{st.session_state.signatures[sid].signature_name}**: " + "; ".join(
+                        f"{c['gene']} (linked to {', '.join(c['supporters'][:4])})" for c in candidates))
+
+
+# ============================================================
+# LAYER 4 - REVIEW / DEBATE
+# ============================================================
+
+def deselect(signature_id: str, gene: str, reason: str):
+    """Mark a candidate gene as not selected, remembering why."""
+    st.session_state.deselected.setdefault(signature_id, {})[gene] = reason
+    invalidate_approval(signature_id)
+
+
+def clear_deselections(signature_id: str, prefix: str):
+    """Forget earlier deselections made by one layer (e.g. a previous debate)."""
+    current = st.session_state.deselected.get(signature_id, {})
+    st.session_state.deselected[signature_id] = {
+        gene: reason for gene, reason in current.items() if not reason.startswith(prefix)}
+
+
+def render_layer4(resources: Dict):
+    st.markdown("---")
+    st.markdown("### Layer 4 - Verification (optional)")
+    method = st.radio("Method", ["Single-model review", "Three-agent debate"], horizontal=True,
+                      key="verification_method")
+    if method == "Single-model review":
+        render_review(resources)
     else:
-        render_layer4_debate_verification(query)
+        render_debate()
 
 
-def render_layer4_standard_verification(query):
-    """Standard batch LLM verification (original implementation)"""
-    
-    st.markdown("#### 📋 Batch LLM Verification")
-    
-    verification_mode = st.radio(
-        "Mode:",
-        ["None", "Verify Only", "Verify + Expand"],
-        index=0,
-        key="batch_mode"
-    )
-    
-    if verification_mode != "None":
+def render_review(resources: Dict):
+    st.caption("One model reviews each signature and proposes removals and additions. "
+               "Proposed removals are deselected by default; you decide in Layer 5.")
+    col1, col2, col3 = st.columns(3)
+    model = model_selectbox(col1, "Model", reasoning_model(), "review_model_choice")
+    additions = col2.checkbox("Suggest additions", value=True)
+    batch_size = col3.slider("Signatures per call", 1, 8, 4)
 
-        # Live model list - see model_registry.py. Never a hardcoded list.
-        _available = st.session_state.get('available_models') or []
-        if _available:
-            _default = active_model("reasoning")
-            llm2_model = st.selectbox(
-                "Model:",
-                _available,
-                index=_available.index(_default) if _default in _available else 0,
-                key="llm2_model",
-                help="Groq model used for verification. List is fetched live from your account."
-            )
-        else:
-            llm2_model = None
-            st.info("Validate your Groq API key in the sidebar to load available models.")
-        
-        context_options = st.multiselect(
-            "Context:",
-            ["Original query context", "Pathway sources used", "Mechanism description", "All of the above"],
-            default=["All of the above"],
-            key="context_opts"
-        )
-        
-        batch_size = st.slider("Batch size:", 1, 10, 5, 1, help="Signatures per API call", key="batch_size_slider")
-        
-        if st.button("🧬 Run Batch Verification", type="primary", width="stretch", key="run_batch"):
-            
-            timing = LayerTiming("Layer 4: Batch Verification", time.time())
-            
-            signatures = [st.session_state.signature_cache[sid] for sid in st.session_state.signature_ids]
-            
-            mode = "verify_only" if "Only" in verification_mode else "verify_expand"
-            
-            progress_bar = st.progress(0)
-            status = st.empty()
-            
-            status.info(f"🧬 Verifying {len(signatures)} signatures in batches of {batch_size}...")
-            
-            suggestions = verify_signatures_batch(
-                signatures,
-                query,
-                mode,
-                llm2_model,
-                st.session_state.groq_api_key,
-                context_options,
-                batch_size=batch_size
-            )
-            
-            timing.end_time = time.time()
-            st.session_state.layer_timings.append(timing)
-            st.session_state.llm2_suggestions = suggestions
-            
-            progress_bar.progress(1.0)
-            status.success(f"✅ Verified {len(signatures)} signatures!")
-            st.markdown(f'<span class="timing-badge">⏱️ {timing.duration_str}</span>', unsafe_allow_html=True)
-            
-            time.sleep(1)
-            st.rerun()
-    
+    if st.button("Run review", type="primary", width="stretch"):
+        signatures = ordered_signatures()
+        started = time.time()
+        status = st.empty()
+        suggestions, calls = verify_signatures(
+            get_router(), model, signatures, st.session_state.query_used,
+            suggest_additions=additions, context=st.session_state.bio_context,
+            publication_mode=st.session_state.generation_mode == 'publication',
+            batch_size=batch_size, fallbacks=fallbacks_for(model), index=resources['index'],
+            progress=lambda done, total: status.info(f"Reviewing batch {done}/{total}..."))
+        status.empty()
+
+        st.session_state.suggestions = suggestions
+        st.session_state.review_calls = calls
+        st.session_state.review_model = model
+        for sig in signatures:
+            result = suggestions.get(sig.signature_id, {})
+            clear_deselections(sig.signature_id, "llm review")
+            if result.get('status') == 'ok':
+                sig.llm2_verified = True
+                for gene in result['genes_to_remove']:
+                    deselect(sig.signature_id, gene,
+                             f"llm review: {result['reasoning'].get(gene) or 'no reason given'}")
+        record_timing("Layer 4: review", started)
+        st.rerun()
+
+    suggestions = st.session_state.suggestions
+    if suggestions:
+        ok = sum(1 for s in suggestions.values() if s['status'] == 'ok')
+        failed = len(suggestions) - ok
+        if failed:
+            errors = sorted({s['error'] for s in suggestions.values() if s['status'] == 'failed'})
+            st.error(f"Review failed for {failed} of {len(suggestions)} signatures - they were "
+                     f"NOT reviewed.\n\n" + "\n\n".join(f"`{e}`" for e in errors[:3]))
+        if ok:
+            removals = sum(len(s['genes_to_remove']) for s in suggestions.values())
+            adds = sum(len(s['genes_to_add']) for s in suggestions.values())
+            calls = st.session_state.review_calls
+            used = sorted({c.get('model') for c in calls if c.get('model')})
+            st.success(f"Reviewed {ok} signatures with `{', '.join(used) or st.session_state.review_model}`: "
+                       f"{removals} removals and {adds} additions proposed (see Layer 5).")
+            for note in sorted({n for c in calls for n in c.get('notes', [])}):
+                st.caption(f"Note: {note}")
+
+
+def render_debate():
+    st.caption("Three models with opposed burdens of proof vote keep/remove on every gene, "
+               "seeing per-gene database evidence. Contested genes are re-argued. A gene is "
+               "voted out only on a confidence-weighted majority.")
+    available = available_models()
+    defaults = resolve_debate_models(available)
+
+    cols = st.columns(3)
+    models = {}
+    for col, role in zip(cols, DEBATE_ROLES):
+        models[role] = model_selectbox(col, ROLE_LABELS[role], defaults.get(role),
+                                       f"debate_model_{role}")
+    diversity = debate_diversity(models)
+    if diversity['distinct_models'] < 3:
+        st.warning(f"Only {diversity['distinct_models']} distinct model(s) across the three roles. "
+                   "Agreement between copies of one model is weak evidence - connect another "
+                   "provider in the sidebar for an independent voice.")
     else:
-        st.info("Batch verification disabled")
+        st.caption(f"{diversity['distinct_models']} distinct models from "
+                   f"{diversity['distinct_families']} model families. Connecting more providers "
+                   "(or OpenRouter) lets the three roles come from three different families.")
 
+    col1, col2, col3 = st.columns(3)
+    max_rounds = col1.slider("Max rounds", 1, 4, 3)
+    agreement_threshold = col2.slider("Stop at agreement", 0.5, 1.0, 1.0, 0.05,
+                                      help="Fraction of genes with unanimous votes.")
+    removal_threshold = col3.slider("Removal threshold", 0.5, 0.9, DEFAULT_REMOVAL_THRESHOLD, 0.05,
+                                    help="Pooled probability of removal required (plus a majority). "
+                                         "0.6 means clearly above a coin flip.")
+    auto_apply = st.checkbox("Deselect the genes the agents vote out (you can re-select them in Layer 5)",
+                             value=True)
 
-def render_layer4_debate_verification(query):
-    """NEW: Multi-round debate verification"""
-    
-    st.markdown("#### 🗣️ Multi-Round AI Debate System")
-    
-    st.markdown("""
-    <div style='background: linear-gradient(135deg, rgba(255, 107, 157, 0.1), rgba(255, 93, 143, 0.1)); 
-                padding: 1.2rem; border-radius: 12px; margin: 1rem 0; 
-                border-left: 4px solid #FF6B9D;'>
-    <strong>✨ Database-Grounded Evidence + 3 Expert LLMs</strong><br><br>
-    Three LLMs (chosen live from your Groq account) debate signature quality with evidence from:<br>
-    • Gene-Gene network (2.1M probabilities)<br>
-    • Gene-Pathway network (2.1M probabilities)<br>
-    • GTEx expression (47K genes)<br>
-    • Gene evidence database (10K genes)
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Debate configuration
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        num_rounds = st.slider(
-            "Number of rounds",
-            min_value=1,
-            max_value=20,
-            value=10,
-            step=1,
-            help="More rounds = more thorough but slower",
-            key="debate_rounds"
-        )
-        st.session_state.debate_num_rounds = num_rounds
-    
-    with col2:
-        convergence_threshold = st.slider(
-            "Convergence threshold",
-            min_value=0.5,
-            max_value=1.0,
-            value=0.85,
-            step=0.05,
-            help="Stop when models agree this much",
-            key="debate_convergence"
-        )
-    
-    # Initialize enhanced DB client
-    if st.button("🔌 Initialize Database Connection", width="stretch", key="init_db"):
-        with st.spinner("Connecting to database API..."):
-            if initialize_enhanced_db_client():
-                st.success("✅ Database client ready!")
-            else:
-                st.error("❌ Failed to initialize database client")
-    
-    # Run debate button
-    if st.button("🗣️ Start Multi-Round Debate", type="primary", width="stretch", key="run_debate"):
+    backend_up = backend_health()
+    if not backend_up:
+        st.warning("Pathway API offline: the debate will run WITHOUT database evidence and will "
+                   "be labelled as such in the export.\n\n" + WAKE_BACKEND_HINT)
 
-        if not initialize_enhanced_db_client():
-            st.error("Please initialize database connection first")
-            return
+    pending = ordered_signatures()
+    estimate = sum(estimate_tokens_per_model(len(s.genes), max_rounds, backend_up) for s in pending)
+    st.caption(
+        f"Up to about {estimate:,} tokens per model for {len(pending)} signatures (usually less: "
+        "most debates stop early). Free-tier keys cap tokens per minute and per day, so large "
+        "runs pause between calls. A model that runs out of quota is replaced automatically "
+        "and the substitution is recorded in the export.")
 
-        timing = LayerTiming("Layer 4: Multi-Round Debate", time.time())
-
-        signatures = [st.session_state.signature_cache[sid] for sid in st.session_state.signature_ids]
-
-        # Get tissue context
-        bio_context = st.session_state.get('bio_context')
-        tissue_context = bio_context['tissue'] if bio_context else None
-
-        # Debate each signature individually to avoid context overflow
-        st.info(f"🗣️ Running debates on {len(signatures)} signatures individually (prevents context overflow)...")
-
-        debate_results_dict = {}
-        progress_bar = st.progress(0)
-        status_text = st.empty()
+    if st.button("Start debate", type="primary", width="stretch"):
+        engine = DebateEngine(get_router(), models, fallbacks=available,
+                              removal_threshold=removal_threshold)
+        db = get_db_client()
+        context = st.session_state.bio_context
+        signatures = ordered_signatures()
+        started = time.time()
+        progress = st.progress(0.0)
+        status = st.empty()
+        problems = []
 
         for i, sig in enumerate(signatures):
-            status_text.info(f"🗣️ Signature {i+1}/{len(signatures)}: {sig.signature_name} ({len(sig.genes)} genes)")
-
-            result = run_validation_debate_sync(
-                genes=sig.genes,
-                tissue_context=tissue_context,
-                max_rounds=min(5, num_rounds)  # Max 5 rounds per signature to conserve tokens
-            )
-
-            if result:
-                debate_results_dict[sig.signature_id] = result
-
-                # Apply removals immediately
-                if result.final_decision == "remove" and result.affected_genes:
-                    genes_to_remove = set(result.affected_genes)
-                    original_count = len(sig.genes)
-                    sig.genes = [g for g in sig.genes if g not in genes_to_remove]
-                    sig.debate_verified = True
-
-                    # Store quality metrics
-                    if hasattr(result, 'decision_metrics'):
-                        sig.debate_entropy = result.decision_metrics.get('entropy', 0.0)
-                        sig.debate_conflict = result.decision_metrics.get('conflict', 0.0)
-                    if hasattr(result, 'stability_score'):
-                        sig.stability_score = result.stability_score
-
-                    st.session_state.signature_cache[sig.signature_id] = sig
-
-                    status_text.success(
-                        f"✅ {sig.signature_name}: Removed {original_count - len(sig.genes)} genes "
-                        f"(confidence: {result.confidence:.1%})"
-                    )
-                else:
-                    status_text.info(f"✅ {sig.signature_name}: No changes recommended")
-            else:
-                status_text.warning(f"⚠️ {sig.signature_name}: Debate failed")
-
-            progress_bar.progress((i + 1) / len(signatures))
-
-        timing.end_time = time.time()
-        st.session_state.layer_timings.append(timing)
-
-        progress_bar.empty()
-        status_text.empty()
-
-        # Store all results
-        st.session_state.debate_results_per_signature = debate_results_dict
-
-        st.success(f"✅ Completed debates on {len(debate_results_dict)}/{len(signatures)} signatures!")
-        st.markdown(f'<span class="timing-badge">⏱️ {timing.duration_str}</span>', unsafe_allow_html=True)
-
-        time.sleep(1)
-        st.rerun()
-    
-
-    # Show debate results (SIMPLE UI)
-    if st.session_state.get('debate_results_per_signature'):
-        st.markdown("---")
-        st.markdown("### 💬 Debate Results by Signature")
-
-        signatures = [st.session_state.signature_cache[sid] for sid in st.session_state.signature_ids]
-
-        for sig in signatures:
-            if sig.signature_id in st.session_state.debate_results_per_signature:
-                result = st.session_state.debate_results_per_signature[sig.signature_id]
-
-                with st.expander(
-                    f"🔄 {sig.signature_name} - {result.total_rounds} rounds "
-                    f"(Convergence: {result.convergence_rate:.1%})",
-                    expanded=False
-                ):
-                    # Show each round
-                    for debate_round in result.all_rounds:
-                        conv_pct = debate_round.convergence_rate * 100
-                        st.caption(f"**Round {debate_round.round_num}** (Agreement: {conv_pct:.1f}%)")
-
-                        for msg in debate_round.messages:
-                            render_debate_message_simple(
-                                speaker=msg.speaker,
-                                message=msg.message,
-                                db_sources=msg.db_sources if msg.db_sources else None
-                            )
-
-                        st.markdown("---")
-
-                    # Final decision for this signature
-                    st.markdown("**🎯 Final Decision:**")
-                    st.caption(f"• Action: {result.final_decision.upper()}")
-                    if result.affected_genes:
-                        st.caption(f"• Genes affected: {', '.join(result.affected_genes)}")
-                    st.caption(f"• Confidence: {result.confidence:.1%}")
-                    st.caption(f"• Convergence: {result.convergence_rate:.1%}")
-
-        st.markdown("---")
-
-    elif st.session_state.current_debate_result:
-        # Legacy support for old single-debate format
-        st.markdown("---")
-        st.markdown("### 💬 Debate Conversation")
-
-        result = st.session_state.current_debate_result
-        
-        # Show each round in expandable sections
-        for debate_round in result.all_rounds:
-            conv_pct = debate_round.convergence_rate * 100
-            with st.expander(f"🔄 Round {debate_round.round_num} of {result.total_rounds} (Convergence: {conv_pct:.1f}%)", expanded=(debate_round.round_num == 1)):
-                
-                # Render messages with simple UI
-                for msg in debate_round.messages:
-                    render_debate_message_simple(
-                        speaker=msg.speaker,
-                        message=msg.message,
-                        db_sources=msg.db_sources if msg.db_sources else None
-                    )
-        
-        # Convergence visualization (native Streamlit - no dependencies)
-        st.markdown("---")
-        st.markdown("### 📈 Debate Convergence")
-
-        convergence_data = pd.DataFrame({
-            'Round': [r.round_num for r in result.all_rounds],
-            'Agreement (%)': [r.convergence_rate * 100 for r in result.all_rounds]
-        })
-
-        st.line_chart(convergence_data.set_index('Round'))
-
-        # Show quality metrics
-        if hasattr(result, 'decision_metrics') and result.decision_metrics:
-            col1, col2, col3 = st.columns(3)
-
-            with col1:
-                st.metric(
-                    "Uncertainty",
-                    f"{result.decision_metrics.get('entropy', 0) * 100:.1f}%",
-                    help="Shannon entropy: Lower is better (0% = no uncertainty)"
-                )
-
-            with col2:
-                st.metric(
-                    "Conflict",
-                    f"{result.decision_metrics.get('conflict', 0) * 100:.1f}%",
-                    help="Vote variance: Lower is better (0% = perfect agreement)"
-                )
-
-            with col3:
-                st.metric(
-                    "Stability",
-                    f"{getattr(result, 'stability_score', 0.5) * 100:.1f}%",
-                    help="Overall quality: Higher is better (100% = high confidence)"
-                )
-
-        # Optional: Advanced analytics (only loads if plotly installed)
-        with st.expander("📊 Advanced Analytics (Click to Load)", expanded=False):
+            status.info(f"Debating {i + 1}/{len(signatures)}: {sig.signature_name}")
             try:
-                import plotly.graph_objects as go
+                result, evidence_error = debate_signature(
+                    engine, sig, db=db if backend_up else None,
+                    query=st.session_state.query_used, context=context,
+                    max_rounds=max_rounds, agreement_threshold=agreement_threshold)
+            except Exception as exc:
+                problems.append(f"{sig.signature_name}: debate failed ({str(exc)[:200]})")
+                progress.progress((i + 1) / len(signatures))
+                continue
 
-                # Consensus gauge
-                fig_gauge = go.Figure(go.Indicator(
-                    mode="gauge+number",
-                    value=result.confidence * 100,
-                    title={'text': "Final Confidence"},
-                    domain={'x': [0, 1], 'y': [0, 1]},
-                    gauge={
-                        'axis': {'range': [0, 100]},
-                        'bar': {'color': "darkblue"},
-                        'steps': [
-                            {'range': [0, 50], 'color': "lightgray"},
-                            {'range': [50, 70], 'color': "yellow"},
-                            {'range': [70, 100], 'color': "green"}
-                        ],
-                        'threshold': {
-                            'line': {'color': "red", 'width': 4},
-                            'thickness': 0.75,
-                            'value': 70
-                        }
-                    }
-                ))
+            if evidence_error:
+                problems.append(f"{sig.signature_name}: no database evidence ({evidence_error})")
+            st.session_state.debates[sig.signature_id] = result
+            clear_deselections(sig.signature_id, "debate")
+            if result.failed:
+                problems.append(f"{sig.signature_name}: fewer than two agents answered - "
+                                "no decision was taken.")
+            else:
+                # Metrics go onto the signature; the votes become default
+                # deselections rather than deletions, so the user has the last word.
+                apply_debate_result(sig, result, apply_removals=False)
+                if auto_apply:
+                    for gene in result.genes_to_remove:
+                        decision = result.decisions[gene]
+                        deselect(sig.signature_id, gene,
+                                 f"debate: P(remove)={decision.p_remove:.2f}, "
+                                 f"{decision.n_remove}/{decision.n_voters} agents")
+                invalidate_approval(sig.signature_id)
+            progress.progress((i + 1) / len(signatures))
 
-                fig_gauge.update_layout(height=300)
-                st.plotly_chart(fig_gauge, width="stretch")
+        progress.empty()
+        status.empty()
+        st.session_state.debate_models = models
+        st.session_state.debate_problems = problems
+        record_timing("Layer 4: debate", started)
+        st.rerun()
 
-                # Evolution trajectory
-                rounds = [r.round_num for r in result.all_rounds]
-                convergences = [r.convergence_rate * 100 for r in result.all_rounds]
+    for problem in st.session_state.debate_problems:
+        st.warning(problem)
 
-                fig_line = go.Figure()
-                fig_line.add_trace(go.Scatter(
-                    x=rounds,
-                    y=convergences,
-                    mode='lines+markers',
-                    name='Convergence',
-                    line=dict(color='blue', width=3),
-                    marker=dict(size=10)
-                ))
+    debates = st.session_state.debates
+    if not debates:
+        return
 
-                fig_line.update_layout(
-                    title="Debate Convergence Trajectory",
-                    xaxis_title="Round Number",
-                    yaxis_title="Agreement (%)",
-                    height=400,
-                    hovermode="x unified"
-                )
+    st.markdown("#### Debate results")
+    rows = []
+    for sid, result in debates.items():
+        sig = st.session_state.signatures.get(sid)
+        if not sig:
+            continue
+        m = result.metrics
+        rows.append({
+            'Signature': sig.signature_name, 'Agents': m['agents_responding'],
+            'Rounds': m['rounds'], 'Stop': m['stop_reason'], 'Voted out': m['genes_removed'],
+            'Stability': m['stability'], 'Agreement': m['agreement'],
+            'Fleiss κ': m['fleiss_kappa'], 'Entropy': m['entropy'], 'Conflict': m['conflict'],
+        })
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
 
-                st.plotly_chart(fig_line, width="stretch")
+    by_name = {st.session_state.signatures[sid].signature_name: result
+               for sid, result in debates.items() if sid in st.session_state.signatures}
+    if not by_name:
+        return
+    result = by_name[st.selectbox("Inspect a debate", list(by_name),
+                                  key=f"debate_view_{st.session_state.run_id}")]
+    st.caption("Models that answered: " + " · ".join(
+        f"{ROLE_LABELS[r]} = `{m}`" for r, m in result.models.items()))
+    concordance = result.metrics['database_concordance']
+    st.caption(f"Database concordance: {concordance['flagged_and_removed']} of "
+               f"{concordance['flagged_genes']} database-flagged genes voted out, "
+               f"{concordance['flagged_but_kept']} kept; "
+               f"{concordance['removed_without_flag']} voted out without any database flag.")
 
-            except ImportError:
-                st.info("💡 Install 'plotly' for advanced visualizations:\n```pip install plotly>=5.18.0```")
+    st.dataframe(pd.DataFrame([{
+        'Gene': d.gene, 'Decision': d.decision,
+        'P(remove)': None if d.p_remove is None else round(d.p_remove, 2),
+        'Entropy': None if d.entropy is None else round(d.entropy, 2),
+        'Conflict': None if d.conflict is None else round(d.conflict, 2),
+        **{ROLE_LABELS[role]: f"{v['vote']} ({v['confidence']:.2f})" for role, v in d.votes.items()},
+        'DB flags': ", ".join(d.db_flags),
+    } for d in result.decisions.values()]), hide_index=True, width="stretch")
 
-        # Final consensus
-        st.markdown("---")
-        st.markdown("### 🎯 Final Consensus")
-        
-        consensus_text = f"""
-**Decision:** {result.final_decision.upper()}
+    with st.expander("Arguments by round"):
+        for debate_round in result.rounds:
+            st.markdown(f"**Round {debate_round.round_num}** - agreement "
+                        f"{debate_round.agreement:.0%}, {debate_round.flips} vote(s) changed")
+            for turn in debate_round.turns:
+                label = f"{ROLE_LABELS.get(turn.role, turn.role)} (`{turn.model}`)"
+                if turn.error:
+                    st.error(f"{label} did not answer: {turn.error}")
+                    continue
+                reasons = [f"{g}: {turn.votes[g].vote} - {turn.votes[g].reason}"
+                           for g in turn.revoted if turn.votes[g].reason]
+                # st.text never interprets model output as HTML or markdown.
+                st.caption(label)
+                st.text("\n".join(reasons) if reasons else "(no reasons given)")
+                for note in turn.llm.get('notes', []):
+                    st.caption(f"Note: {note}")
 
-**Affected Genes:** {', '.join(result.affected_genes) if result.affected_genes else 'None'}
 
-**Confidence:** {result.confidence:.2%}
+# ============================================================
+# LAYER 5 - APPROVAL
+# ============================================================
 
-**Convergence:** {result.convergence_rate:.2%}
+def selected_genes(sig: GeneSignature) -> List[str]:
+    """Candidate genes minus the current deselections, in ranked order."""
+    off = st.session_state.deselected.get(sig.signature_id, {})
+    return [g for g in sig.genes if g not in off]
 
-**Total Rounds:** {result.total_rounds}
-"""
-        
-        render_debate_message_simple(
-            speaker="consensus",
-            message=consensus_text,
-            db_sources=[]
-        )
-        
-        # Legacy apply recommendations (kept for backward compatibility)
-        if result.final_decision == "remove" and result.affected_genes:
-            st.markdown("---")
 
-            if st.button("✂️ Apply Recommendations (Remove Flagged Genes)", type="primary", width="stretch", key="apply_debate_legacy"):
-                genes_to_remove = set(result.affected_genes)
+def render_layer5():
+    st.markdown("---")
+    st.markdown("### Layer 5 - Review & approve")
+    signatures = ordered_signatures()
+    approved = st.session_state.approved
 
-                # Update all signatures with debate results AND quality metrics
-                signatures = [st.session_state.signature_cache[sid] for sid in st.session_state.signature_ids]
+    col1, col2 = st.columns(2)
+    if col1.button("Approve all", width="stretch"):
+        for sig in signatures:
+            genes = selected_genes(sig)
+            if genes:
+                approved[sig.signature_id] = genes
+        st.rerun()
+    if col2.button("Clear approvals", width="stretch"):
+        st.session_state.approved = {}
+        st.rerun()
+    st.caption(f"{len(approved)} of {len(signatures)} signatures approved")
 
-                for sig in signatures:
-                    sig.genes = [g for g in sig.genes if g not in genes_to_remove]
-                    sig.debate_verified = True
+    minimum = (st.session_state.retrieval_params or {}).get('min_genes', 0)
+    for sig in signatures:
+        sid = sig.signature_id
+        current = selected_genes(sig)
+        mark = "✅ " if sid in approved else ""
+        with st.expander(f"{mark}{sig.signature_name} ({len(current)} of {len(sig.genes)} genes)"):
+            tags = [f"support {sig.support():.2f}", f"retrieval: {sig.retrieval_mode}"]
+            if sig.dam_expanded:
+                tags.append("network-expanded")
+            if sig.debate_verified and sig.stability_score is not None:
+                tags.append(f"debate stability {sig.stability_score:.2f} ({sig.quality_label()})")
+            st.caption(" · ".join(tags))
+            if sig.description:
+                st.caption(sig.description)
+            if len(current) < minimum:
+                st.warning(f"Only {len(current)} genes are selected - below the minimum of "
+                           f"{minimum}. The retrieved set may have been too broad for this "
+                           "mechanism; re-select genes below if the votes were too strict.")
 
-                    # NEW: Tag with quality metrics from debate
-                    if hasattr(result, 'decision_metrics'):
-                        sig.debate_entropy = result.decision_metrics.get('entropy', 0.0)
-                        sig.debate_conflict = result.decision_metrics.get('conflict', 0.0)
+            suggestion = st.session_state.suggestions.get(sid, {})
+            if suggestion.get('status') == 'failed':
+                st.warning("LLM review failed for this signature - it has not been reviewed.")
+            off = st.session_state.deselected.get(sid, {})
+            voted_out = {g: why for g, why in off.items() if g in sig.genes and why != "user"}
+            if voted_out:
+                st.caption("Deselected by verification (re-select to overrule): " + "; ".join(
+                    f"{g} [{why}]" for g, why in voted_out.items()))
+            if sig.housekeeping_flagged and st.session_state.generation_mode != 'publication':
+                present = [g for g in current if is_housekeeping(g)]
+                if present:
+                    st.caption("Housekeeping genes present: " + ", ".join(present))
+            if sig.removed_genes:
+                st.caption("Removed at build time: " + "; ".join(
+                    f"{g} ({why})" for g, why in sig.removed_genes.items()))
 
-                    if hasattr(result, 'stability_score'):
-                        sig.stability_score = result.stability_score
-
-                    st.session_state.signature_cache[sig.signature_id] = sig
-
-                # Show quality summary
-                if hasattr(result, 'stability_score'):
-                    st.info(f"📊 Debate Quality: {result.stability_score:.2%} stability score")
-
-                st.success(f"✅ Removed {len(genes_to_remove)} genes from all signatures")
-                time.sleep(1)
+            # The widget key includes the candidate list and the deselections,
+            # so the picker is rebuilt whenever an upstream layer changes either.
+            chosen = st.multiselect(
+                "Genes (ranked; remove any you reject)", options=sig.genes, default=current,
+                key=f"genes_{sid}_{st.session_state.run_id}_{hash(tuple(sig.genes))}_"
+                    f"{hash(frozenset(off))}")
+            now_off = set(sig.genes) - set(chosen)
+            if now_off != set(g for g in off if g in sig.genes):
+                st.session_state.deselected[sid] = {g: off.get(g, "user") for g in sig.genes
+                                                    if g in now_off}
+                invalidate_approval(sid)
                 st.rerun()
 
-        # Gene addition suggestions feature
-        if st.session_state.current_debate_result:
-            st.markdown("---")
-            st.markdown("### 🧬 Suggest Gene Additions (Optional)")
-
-            st.markdown("""
-            <div style='background: rgba(0, 127, 255, 0.1); padding: 1rem; border-radius: 8px; border-left: 4px solid #007FFF;'>
-            Use gene-gene network (DAM) to suggest biologically relevant additions based on connectivity.
-            </div>
-            """, unsafe_allow_html=True)
+            proposals = [g for g in suggestion.get('genes_to_add', []) if g not in sig.genes]
+            if proposals:
+                st.markdown("**LLM-suggested additions**")
+                for col, gene in zip(st.columns(len(proposals)), proposals):
+                    if col.button(f"Add {gene}", key=f"add_{sid}_{gene}",
+                                  help=suggestion['reasoning'].get(gene) or None):
+                        sig.genes.append(gene)
+                        sig.gene_sources[gene] = 'llm'
+                        invalidate_approval(sid)
+                        st.rerun()
 
             col1, col2 = st.columns(2)
-
-            with col1:
-                addition_strength = st.slider(
-                    "Network confidence threshold:",
-                    min_value=0.5,
-                    max_value=0.9,
-                    value=0.7,
-                    step=0.05,
-                    help="Higher = only very confident connections"
-                )
-
-            with col2:
-                max_additions = st.slider(
-                    "Max additions per signature:",
-                    min_value=1,
-                    max_value=10,
-                    value=3,
-                    step=1
-                )
-
-            _backend_up = backend_health()
-            if not _backend_up:
-                st.warning(
-                    "⚠️ **Gene addition needs the pathway API, which is asleep "
-                    "or offline.**\n\n"
-                    + WAKE_BACKEND_HINT
-                    + "\n\nExisting signatures are unaffected."
-                )
-
-            if st.button("🔍 Generate Addition Suggestions", type="primary", width="stretch",
-                         key="gen_additions", disabled=not _backend_up):
-
-                suggestions_made = False
-                signatures = [st.session_state.signature_cache[sid] for sid in st.session_state.signature_ids]
-
-                # Initialize suggestions storage
-                if 'gene_addition_suggestions' not in st.session_state:
-                    st.session_state.gene_addition_suggestions = {}
-
-                try:
-                    db_api = DatabaseClient(MSIGDB_API_URL)
-
-                    progress_bar = st.progress(0)
-                    status_text = st.empty()
-
-                    for i, sig in enumerate(signatures):
-                        status_text.info(f"🔍 Analyzing signature {i+1}/{len(signatures)}: {sig.signature_name}")
-
-                        try:
-                            # Get high-confidence neighbors
-                            expanded = db_api.expand_signature_smart(
-                                seed_genes=sig.genes,
-                                strength=addition_strength,
-                                max_pathways_per_gene=max_additions * 2  # Get extras for filtering
-                            )
-
-                            # Get candidates (new genes only)
-                            candidates = list(set(expanded) - set(sig.genes))
-
-                            # Filter housekeeping genes
-                            from complete_module_replacements import HOUSEKEEPING_GENES
-                            filtered_candidates = [
-                                g for g in candidates
-                                if g not in HOUSEKEEPING_GENES
-                                and not g.startswith(('RPL', 'RPS', 'MT-'))
-                            ][:max_additions]
-
-                            if filtered_candidates:
-                                st.session_state.gene_addition_suggestions[sig.signature_id] = filtered_candidates
-                                suggestions_made = True
-
-                        except Exception as e:
-                            st.warning(f"⚠️ Failed for {sig.signature_name}: {str(e)[:80]}")
-
-                        progress_bar.progress((i + 1) / len(signatures))
-
-                    status_text.empty()
-                    progress_bar.empty()
-
-                    if suggestions_made:
-                        st.success(f"✅ Generated suggestions for {len(st.session_state.gene_addition_suggestions)} signatures")
-                        st.info("💡 Review suggestions in Layer 5 (Approval)")
-                    else:
-                        st.warning("⚠️ No confident additions found. Try lowering the threshold.")
-
-                except Exception as e:
-                    st.error(f"❌ Failed to connect to database API: {e}")
+            if col1.button("Approve", key=f"approve_{sid}", width="stretch", disabled=not current):
+                approved[sid] = current
+                st.rerun()
+            if sid in approved and col2.button("Withdraw approval", key=f"withdraw_{sid}",
+                                               width="stretch"):
+                approved.pop(sid)
+                st.rerun()
 
 
 # ============================================================
-# LAYER 5 - TEXT-BASED GENE SELECTION
+# EXPORT
 # ============================================================
 
-def render_layer5_approval_text_based():
-    """Layer 5: Text-based clickable gene selection"""
-    
-    st.markdown("---")
-    st.markdown("### 👤 Layer 5: Review & Approve")
-    
-    if not st.session_state.signature_ids:
+def approved_signatures() -> List[GeneSignature]:
+    """Frozen copies of approved signatures: exactly the approved genes, with every
+    gene left out recorded alongside the reason."""
+    out = []
+    for sid, genes in st.session_state.approved.items():
+        sig = st.session_state.signatures.get(sid)
+        if not sig:
+            continue
+        kept = set(genes)
+        reasons = st.session_state.deselected.get(sid, {})
+        removed = {**sig.removed_genes,
+                   **{g: reasons.get(g, "user") for g in sig.genes if g not in kept}}
+        out.append(dataclasses.replace(sig, genes=list(genes), removed_genes=removed))
+    return out
+
+
+def render_export(resources: Dict):
+    signatures = approved_signatures()
+    if not signatures:
         return
-    
-    signatures = [st.session_state.signature_cache[sid] for sid in st.session_state.signature_ids]
-    
-    st.markdown(f"""
-    <div class="warning-box">
-    Review {len(signatures)} signatures. Click genes to toggle selection (white = selected, grey = unselected).
-    </div>
-    """, unsafe_allow_html=True)
-    
-    llm2_suggestions = st.session_state.llm2_suggestions
-    
-    # Initialize gene selections
-    if 'gene_selections' not in st.session_state:
-        st.session_state.gene_selections = {}
-    
-    for i, sig in enumerate(signatures):
-        with st.expander(f"📋 {sig.signature_name} ({len(sig.genes)} genes)", expanded=(i == 0)):
-            
-            st.caption(f"**Facet:** {sig.facet}")
-            st.caption(f"**Mechanism:** {sig.mechanism}")
-            st.caption(f"**Confidence:** {sig.confidence:.3f}")
-            
-            if sig.dam_expanded:
-                st.caption("🔬 DAM Expanded")
-            
-            if sig.debate_verified:
-                st.caption("🗣️ Debate Verified")
-            
-            sig_suggestions = llm2_suggestions.get(sig.signature_id, {})
-            
-            if sig_suggestions.get('genes_to_remove'):
-                st.warning(f"⚠️ LLM suggests removing: {', '.join(sig_suggestions['genes_to_remove'])}")
-            
-            if sig_suggestions.get('genes_to_add'):
-                st.info(f"➕ LLM suggests adding: {', '.join(sig_suggestions['genes_to_add'])}")
-            
-            st.markdown("**Select Genes (click to toggle):**")
-            
-            # Initialize selection for this signature
-            if sig.signature_id not in st.session_state.gene_selections:
-                # Default: all genes selected except LLM-flagged removals
-                flagged = set(sig_suggestions.get('genes_to_remove', []))
-                st.session_state.gene_selections[sig.signature_id] = set(sig.genes) - flagged
-            
-            selected_genes = st.session_state.gene_selections[sig.signature_id]
-            
-            # Create buttons for each gene (styled to look like clickable text)
-            num_cols = 5  # Genes per row
-            gene_rows = [sig.genes[j:j+num_cols] for j in range(0, len(sig.genes), num_cols)]
-            
-            for row_idx, gene_row in enumerate(gene_rows):
-                cols = st.columns(num_cols)
-                
-                for col_idx, gene in enumerate(gene_row):
-                    is_selected = gene in selected_genes
-                    is_flagged = gene in sig_suggestions.get('genes_to_remove', [])
-                    
-                    with cols[col_idx]:
-                        # Button styled as text
-                        button_key = f"gene_{sig.signature_id}_{gene}_{row_idx}_{col_idx}"
-                        
-                        if is_selected and not is_flagged:
-                            label = f"**{gene}**"
-                            button_type = "primary"
-                        elif is_selected and is_flagged:
-                            label = f"**{gene}** ⚠️"
-                            button_type = "secondary"
-                        else:
-                            label = f"~~{gene}~~"
-                            button_type = "secondary"
-                        
-                        if st.button(label, key=button_key, width="stretch", type=button_type):
-                            # Toggle selection
-                            if gene in selected_genes:
-                                selected_genes.remove(gene)
-                            else:
-                                selected_genes.add(gene)
-                            st.rerun()
-            
-            # Show selected genes as comma-separated text
-            st.markdown("---")
-            selected_list = sorted(list(selected_genes))
-            st.caption(f"**Selected ({len(selected_list)} genes):** {', '.join(selected_list)}")
-            
-            # Add suggested genes from LLM2
-            if sig_suggestions.get('genes_to_add'):
-                st.markdown("**💡 LLM Suggested Additions:**")
+    st.markdown("---")
+    st.markdown("### Export")
+    st.success(f"{len(signatures)} approved signatures")
 
-                suggested_cols = st.columns(len(sig_suggestions['genes_to_add']))
-                for col_idx, gene in enumerate(sig_suggestions['genes_to_add']):
-                    with suggested_cols[col_idx]:
-                        add_key = f"add_{sig.signature_id}_{gene}"
-                        if st.button(f"➕ {gene}", key=add_key, width="stretch"):
-                            selected_genes.add(gene)
-                            st.rerun()
+    stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    router = get_router()
+    provenance = build_provenance(
+        resources, pipeline_version=PIPELINE_VERSION, debate_version=DEBATE_VERSION,
+        llm_providers=router.public(), reasoning_effort=router.effort or EFFORT_DEFAULT,
+        pathway_api_url=MSIGDB_API_URL,
+        decomposition=st.session_state.l1_provenance, mechanisms=st.session_state.facets,
+        mechanisms_selected=st.session_state.selected_facet_ids,
+        retrieval_parameters=st.session_state.retrieval_params,
+        network_expansion=st.session_state.expansion_settings,
+        debate_models=st.session_state.debate_models)
+    debates = {sid: result.to_dict() for sid, result in st.session_state.debates.items()
+               if sid in st.session_state.approved}
+    review = {
+        'model': st.session_state.review_model, 'calls': st.session_state.review_calls,
+        'suggestions': {sid: s for sid, s in st.session_state.suggestions.items()
+                        if sid in st.session_state.approved},
+    } if st.session_state.suggestions else {}
 
-            # Show gene addition suggestions from debate system
-            if sig.signature_id in st.session_state.get('gene_addition_suggestions', {}):
-                addition_suggestions = st.session_state.gene_addition_suggestions[sig.signature_id]
-
-                st.markdown("**💡 Network-Based Addition Suggestions (from DAM):**")
-                st.caption("High-confidence neighbors from gene-gene network")
-
-                suggested_cols = st.columns(min(len(addition_suggestions), 5))
-                for col_idx, gene in enumerate(addition_suggestions):
-                    with suggested_cols[col_idx]:
-                        add_key = f"add_debate_{sig.signature_id}_{gene}"
-                        if st.button(f"➕ {gene}", key=add_key, width="stretch"):
-                            selected_genes.add(gene)
-                            st.rerun()
-            
-            st.markdown("---")
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                if st.button("✅ Approve", key=f"approve_{sig.signature_id}", width="stretch"):
-                    
-                    # Update signature with selected genes
-                    sig.genes = list(selected_genes)
-                    sig.llm2_verified = bool(sig_suggestions)
-                    
-                    # Update cache
-                    st.session_state.signature_cache[sig.signature_id] = sig
-                    
-                    # Add to approved list
-                    if sig.signature_id not in st.session_state.final_approved_signature_ids:
-                        st.session_state.final_approved_signature_ids.append(sig.signature_id)
-                    
-                    st.success(f"✅ Approved with {len(selected_genes)} genes")
-            
-            with col2:
-                if st.button("❌ Reject", key=f"reject_{sig.signature_id}", width="stretch"):
-                    # Remove from approved list
-                    if sig.signature_id in st.session_state.final_approved_signature_ids:
-                        st.session_state.final_approved_signature_ids.remove(sig.signature_id)
-                    st.warning("Rejected")
-    
-    # Export
-    if st.session_state.final_approved_signature_ids:
-        st.markdown("---")
-        st.markdown("### 💾 Export")
-        
-        approved_sigs = [
-            st.session_state.signature_cache[sid] 
-            for sid in st.session_state.final_approved_signature_ids
-        ]
-        
-        st.success(f"✅ {len(approved_sigs)} signatures approved")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            # GMT - Sort by stability score (high to low)
-            approved_sigs_sorted = sorted(
-                approved_sigs,
-                key=lambda s: s.stability_score,
-                reverse=True
-            )
-
-            gmt_lines = []
-            for sig in approved_sigs_sorted:
-                sig_id = sig.signature_id
-                desc = f"{sig.facet}|{sig.mechanism}|{len(sig.genes)}genes|conf:{sig.confidence:.3f}|stability:{sig.stability_score:.3f}"
-                if sig.dam_expanded:
-                    desc += "|DAM"
-                if sig.llm2_verified:
-                    desc += "|LLM2"
-                if sig.debate_verified:
-                    desc += "|DEBATE"
-                genes = '\t'.join(sig.genes)
-                gmt_lines.append(f"{sig_id}\t{desc}\t{genes}")
-            
-            gmt_content = '\n'.join(gmt_lines)
-            
-            st.download_button(
-                "📥 Download GMT",
-                data=gmt_content,
-                file_name=f"signatures_{datetime.now().strftime('%Y%m%d_%H%M%S')}.gmt",
-                mime="text/plain",
-                width="stretch"
-            )
-        
-        with col2:
-            # Include mode + context + debate results in export
-            results = {
-                'query': st.session_state.get('main_query', ''),
-                'generation_mode': st.session_state.get('generation_mode', 'exploratory'),
-                'biological_context': st.session_state.get('bio_context'),
-                'verification_method': st.session_state.get('verification_method', 'batch'),
-                'signatures': [sig.to_dict() for sig in approved_sigs_sorted],  # ← Use sorted list
-                'total_signatures': len(approved_sigs_sorted),
-                'timestamp': datetime.now().isoformat(),
-                'layer_timings': {t.layer_name: t.duration_str for t in st.session_state.layer_timings},
-                'pipeline_version': '2.3-entropy-stability',  # ← Update version
-
-                # NEW: Quality summary statistics
-                'quality_summary': {
-                    'high_stability_count': sum(1 for s in approved_sigs_sorted if s.stability_score >= 0.8),
-                    'moderate_stability_count': sum(1 for s in approved_sigs_sorted if 0.5 <= s.stability_score < 0.8),
-                    'low_stability_count': sum(1 for s in approved_sigs_sorted if s.stability_score < 0.5),
-                    'avg_stability': sum(s.stability_score for s in approved_sigs_sorted) / len(approved_sigs_sorted) if approved_sigs_sorted else 0.0,
-                    'avg_entropy': sum(s.debate_entropy for s in approved_sigs_sorted) / len(approved_sigs_sorted) if approved_sigs_sorted else 0.0,
-                    'avg_conflict': sum(s.debate_conflict for s in approved_sigs_sorted) / len(approved_sigs_sorted) if approved_sigs_sorted else 0.0
-                }
-            }
-            
-            # Add debate results if available
-            if st.session_state.current_debate_result:
-                results['debate_summary'] = {
-                    'total_rounds': st.session_state.current_debate_result.total_rounds,
-                    'final_decision': st.session_state.current_debate_result.final_decision,
-                    'affected_genes': st.session_state.current_debate_result.affected_genes,
-                    'confidence': st.session_state.current_debate_result.confidence,
-                    'convergence_rate': st.session_state.current_debate_result.convergence_rate,
-                    # NEW: Quality metrics
-                    'decision_metrics': getattr(st.session_state.current_debate_result, 'decision_metrics', {}),
-                    'stability_score': getattr(st.session_state.current_debate_result, 'stability_score', 0.0)
-                }
-            
-            st.download_button(
-                "📥 Download JSON",
-                data=json.dumps(results, indent=2),
-                file_name=f"signatures_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                mime="application/json",
-                width="stretch"
-            )
+    col1, col2, col3 = st.columns(3)
+    col1.download_button("Download GMT", build_gmt(signatures),
+                         file_name=f"signatures_{stamp}.gmt", mime="text/plain", width="stretch")
+    col2.download_button("Download CSV", build_csv(signatures),
+                         file_name=f"signatures_{stamp}.csv", mime="text/csv", width="stretch")
+    col3.download_button(
+        "Download JSON (full provenance)",
+        build_json(signatures, query=st.session_state.query_used,
+                   generation_mode=st.session_state.generation_mode,
+                   biological_context=st.session_state.bio_context, provenance=provenance,
+                   debates=debates, verification=review,
+                   timings=st.session_state.layer_timings),
+        file_name=f"signatures_{stamp}.json", mime="application/json", width="stretch")
+    st.caption("The JSON records every parameter, provider and model, knowledge-base hash, "
+               "alias mapping and debate vote needed to reproduce and audit this run. "
+               "API keys are never exported.")
 
 
 # ============================================================
-# MAIN APP
+# MAIN
 # ============================================================
 
 def main():
-    st.set_page_config(
-        page_title="Signature Generator - With Debate System",
-        page_icon="🧬",
-        layout="wide"
-    )
-    
+    st.set_page_config(page_title="MSigDB Signature Generator", page_icon="🧬", layout="wide")
     initialize_session_state()
-    inject_minimal_styles()
+    connect_from_environment()
 
-    st.markdown("""
-    <div style='text-align: center; padding: 32px 0 16px 0;'>
-        <h1>🧬 Signature Generator</h1>
-        <p style='font-size: 1.1rem; color: #616161;'>
-            Publication-Grade • Multi-Round Debate • Database-Grounded Evidence
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    st.markdown("---")
-    
+    st.title("🧬 MSigDB Signature Generator")
+    st.caption("LLM-proposed mechanisms · database-decided genes · evidence-grounded debate")
+
+    try:
+        resources = load_index()
+    except Exception as exc:
+        resources = None
+        st.error(f"Failed to load the knowledge base: {exc}")
+
     render_sidebar()
-    
-    tab1, tab2 = st.tabs(["📚 Knowledge Base", "🧬 Generate"])
-    
-    with tab1:
-        render_kb_tab()
-    
-    with tab2:
-        render_generation_tab()
+    tab_generate, tab_kb = st.tabs(["Generate", "Knowledge base"])
+    with tab_generate:
+        render_generation_tab(resources)
+    with tab_kb:
+        render_kb_tab(resources)
 
 
 if __name__ == "__main__":
